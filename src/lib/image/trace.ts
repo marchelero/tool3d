@@ -149,6 +149,32 @@ export function prepareTraceImageData(
   return out;
 }
 
+export function estimateColorCount(
+  imgData: ImageData,
+  alphaThreshold: number
+): number {
+  const { data } = imgData;
+  const bins = new Int32Array(4096);
+  let total = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < alphaThreshold) continue;
+    total += 1;
+    const key =
+      ((data[i] >> 4) << 8) | ((data[i + 1] >> 4) << 4) | (data[i + 2] >> 4);
+    bins[key] += 1;
+  }
+
+  if (total === 0) return 0;
+
+  const minPixels = Math.max(1, Math.floor(total * 0.005));
+  let count = 0;
+  for (let i = 0; i < bins.length; i += 1) {
+    if (bins[i] >= minPixels) count += 1;
+  }
+  return count;
+}
+
 export function tracePreparedImage(
   prepared: ImageData,
   settings: TraceSettings
@@ -212,6 +238,18 @@ export function stripBackgroundPaths(svg: string): string {
       return "";
     }
     return path;
+  });
+}
+
+export function filterSvgByColors(
+  svg: string,
+  excluded: ReadonlySet<string>
+): string {
+  if (excluded.size === 0) return svg;
+  return svg.replace(PATH_REGEX, (path) => {
+    const match = path.match(FILL_REGEX);
+    if (!match) return path;
+    return excluded.has(rgbToHex(parseRgb(match[1]))) ? "" : path;
   });
 }
 

@@ -1,13 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { Maximize2, ZoomIn, ZoomOut } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { extractRegion } from "@/lib/image/canvas";
 import { floodFillByColor } from "@/lib/image/flood-fill";
 import type { BrushSettings, HistoryEntry } from "./types";
+import { ZoomViewport } from "./zoom-viewport";
 
 type EditorTool = "brush" | "wand";
 
@@ -34,18 +32,6 @@ interface Bounds {
   maxY: number;
 }
 
-const CHECKERBOARD_STYLE: React.CSSProperties = {
-  backgroundColor: "#ffffff",
-  backgroundImage:
-    "linear-gradient(45deg, #e4e4e7 25%, transparent 25%), linear-gradient(-45deg, #e4e4e7 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e4e4e7 75%), linear-gradient(-45deg, transparent 75%, #e4e4e7 75%)",
-  backgroundSize: "20px 20px",
-  backgroundPosition: "0 0, 0 10px, 10px -10px, -10px 0",
-};
-
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 8;
-const ZOOM_STEP = 1.25;
-
 export function EditorCanvas({
   workCanvas,
   originalCanvas,
@@ -57,16 +43,11 @@ export function EditorCanvas({
   onStroke,
 }: EditorCanvasProps) {
   const displayRef = useRef<HTMLCanvasElement>(null);
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const lastCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const hoverRef = useRef<Point | null>(null);
   const drawingRef = useRef(false);
   const lastRef = useRef<Point | null>(null);
   const strokeStartRef = useRef<ImageData | null>(null);
   const boundsRef = useRef<Bounds | null>(null);
-
-  const [zoom, setZoom] = useState(1);
-  const [fitScale, setFitScale] = useState(1);
 
   const render = useCallback(() => {
     const display = displayRef.current;
@@ -105,83 +86,6 @@ export function EditorCanvas({
     }
     render();
   }, [workCanvas, version, render]);
-
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport || !workCanvas) return;
-    let resetPending = lastCanvasRef.current !== workCanvas;
-    lastCanvasRef.current = workCanvas;
-    const update = () => {
-      const available = viewport.clientWidth - 32;
-      const next = available > 0 ? Math.min(1, available / workCanvas.width) : 1;
-      setFitScale(next);
-      if (resetPending) {
-        resetPending = false;
-        setZoom(1);
-      }
-    };
-    const observer = new ResizeObserver(update);
-    observer.observe(viewport);
-    return () => observer.disconnect();
-  }, [workCanvas]);
-
-  const zoomTo = useCallback(
-    (next: number, focalX?: number, focalY?: number) => {
-      const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
-      const viewport = viewportRef.current;
-      const scale = fitScale * zoom;
-      const nextScale = fitScale * clamped;
-      if (!viewport || scale <= 0 || nextScale <= 0) {
-        setZoom(clamped);
-        return;
-      }
-      const fx = focalX ?? viewport.clientWidth / 2;
-      const fy = focalY ?? viewport.clientHeight / 2;
-      const contentX = (viewport.scrollLeft + fx) / scale;
-      const contentY = (viewport.scrollTop + fy) / scale;
-      setZoom(clamped);
-      requestAnimationFrame(() => {
-        viewport.scrollLeft = contentX * nextScale - fx;
-        viewport.scrollTop = contentY * nextScale - fy;
-      });
-    },
-    [fitScale, zoom]
-  );
-
-  useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-    const onWheel = (event: WheelEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
-      event.preventDefault();
-      const rect = viewport.getBoundingClientRect();
-      const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-      zoomTo(zoom * factor, event.clientX - rect.left, event.clientY - rect.top);
-    };
-    viewport.addEventListener("wheel", onWheel, { passive: false });
-    return () => viewport.removeEventListener("wheel", onWheel);
-  }, [zoom, zoomTo]);
-
-  useEffect(() => {
-    if (!enabled) return;
-    const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (event.key === "+" || event.key === "=") {
-        event.preventDefault();
-        zoomTo(zoom * ZOOM_STEP);
-      } else if (event.key === "-" || event.key === "_") {
-        event.preventDefault();
-        zoomTo(zoom / ZOOM_STEP);
-      } else if (event.key === "0") {
-        event.preventDefault();
-        zoomTo(1);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [enabled, zoom, zoomTo]);
 
   const getPoint = (event: ReactPointerEvent<HTMLCanvasElement>): Point => {
     const display = displayRef.current;
@@ -367,84 +271,24 @@ export function EditorCanvas({
 
   if (!workCanvas) return null;
 
-  const displayWidth = workCanvas.width * fitScale * zoom;
-
   return (
-    <div className="relative">
-      <div
-        ref={viewportRef}
-        className="max-h-[70vh] overflow-auto rounded-xl border p-4"
-        style={CHECKERBOARD_STYLE}
-      >
-        <div className="flex w-max min-w-full items-center justify-center">
-          <canvas
-            ref={displayRef}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-            onPointerLeave={handlePointerLeave}
-            className="block touch-none select-none rounded-md"
-            style={{
-              width: displayWidth,
-              height: "auto",
-              cursor: enabled ? "crosshair" : "default",
-            }}
-          />
-        </div>
-      </div>
-
-      <div className="absolute right-3 top-3 z-10 flex items-center gap-0.5 rounded-lg border bg-background/90 p-1 shadow-sm backdrop-blur">
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          onClick={() => zoomTo(zoom / ZOOM_STEP)}
-          aria-label="Alejar"
-          title="Alejar (Ctrl + rueda)"
-          disabled={zoom <= MIN_ZOOM}
-        >
-          <ZoomOut className="size-3.5" />
-        </Button>
-        <Button
-          size="xs"
-          variant="ghost"
-          onClick={() => zoomTo(1)}
-          className="min-w-12 justify-center tabular-nums"
-          title="Ajustar a la ventana (0)"
-        >
-          {Math.round(zoom * 100)}%
-        </Button>
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          onClick={() => zoomTo(zoom * ZOOM_STEP)}
-          aria-label="Acercar"
-          title="Acercar (Ctrl + rueda)"
-          disabled={zoom >= MAX_ZOOM}
-        >
-          <ZoomIn className="size-3.5" />
-        </Button>
-        <Separator orientation="vertical" className="mx-0.5 h-4" />
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          onClick={() => zoomTo(1)}
-          aria-label="Ajustar a la ventana"
-          title="Ajustar a la ventana"
-        >
-          <Maximize2 className="size-3.5" />
-        </Button>
-        <Button
-          size="xs"
-          variant="ghost"
-          onClick={() => zoomTo(1 / fitScale)}
-          className="justify-center tabular-nums"
-          title="Tamaño real (1:1)"
-          disabled={fitScale >= 1}
-        >
-          1:1
-        </Button>
-      </div>
-    </div>
+    <ZoomViewport
+      contentWidth={workCanvas.width}
+      contentHeight={workCanvas.height}
+      resetKey={workCanvas}
+      enableKeyboard={enabled}
+      background="checker"
+    >
+      <canvas
+        ref={displayRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onPointerLeave={handlePointerLeave}
+        className="block h-full w-full touch-none select-none"
+        style={{ cursor: enabled ? "crosshair" : "default" }}
+      />
+    </ZoomViewport>
   );
 }

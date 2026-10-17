@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Download,
@@ -15,6 +15,7 @@ import {
   Sparkles,
   Undo2,
   Wand2,
+  X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -49,10 +50,11 @@ import {
 import { removeBackgroundClient } from "@/lib/image/background";
 import {
   DEFAULT_TRACE_SETTINGS,
+  estimateColorCount,
+  filterSvgByColors,
   prepareTraceImageData,
   rgbToHex,
   splitSvgByColor,
-  svgToDataUrl,
   tracePreparedImage,
   type ColorLayer,
   type TraceSettings,
@@ -66,16 +68,48 @@ import {
 
 import { Dropzone } from "./dropzone";
 import { EditorCanvas } from "./editor-canvas";
+import { SvgPreview } from "./svg-preview";
 import type { BrushSettings, HistoryEntry } from "./types";
 
 type Status = "empty" | "ready" | "removing";
+type TabValue = "background" | "vector";
 
 interface ProgressState {
   label: string;
   percent: number;
 }
 
+interface TraceResult {
+  svg: string;
+  width: number;
+  height: number;
+}
+
+interface ResultFile {
+  name: string;
+  bytes: number;
+  color?: string;
+  onDownload: () => void;
+}
+
 const MAX_HISTORY = 30;
+const TRACE_DEBOUNCE_MS = 400;
+const MAX_COLORS = 32;
+const DEFAULT_COLORS = 8;
+
+function clampColorCount(count: number): number {
+  if (count <= 0) return DEFAULT_COLORS;
+  return Math.max(2, Math.min(MAX_COLORS, count));
+}
+
+function countColors(canvas: HTMLCanvasElement): number {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return 0;
+  return estimateColorCount(
+    ctx.getImageData(0, 0, canvas.width, canvas.height),
+    128
+  );
+}
 
 function describeProgress(key: string): string {
   if (key.includes("fetch") || key.includes("download")) {
@@ -85,6 +119,150 @@ function describeProgress(key: string): string {
     return "Procesando imagen";
   }
   return "Procesando";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function computeTrace(
+  canvas: HTMLCanvasElement,
+  settings: TraceSettings
+): TraceResult | null {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const prepared = prepareTraceImageData(data, settings);
+  const svg = tracePreparedImage(prepared, settings);
+  if (!/<path\b/.test(svg)) return null;
+  return { svg, width: prepared.width, height: prepared.height };
+}
+
+function ColorPalette({
+  layers,
+  excluded,
+  onToggle,
+}: {
+  layers: ColorLayer[];
+  excluded: ReadonlySet<string>;
+  onToggle: (hex: string) => void;
+}) {
+  if (layers.length === 0) return null;
+  const visibleCount = layers.filter(
+    (layer) => !excluded.has(rgbToHex(layer.rgb))
+  ).length;
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <Label>Colores detectados</Label>
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {visibleCount}/{layers.length}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {layers.map((layer) => {
+          const hex = rgbToHex(layer.rgb);
+          const off = excluded.has(hex);
+          return (
+            <button
+              key={hex}
+              type="button"
+              onClick={() => onToggle(hex)}
+              aria-pressed={!off}
+              title={
+                off
+                  ? `${hex} · excluido (clic para incluirlo)`
+                  : `${hex} · ${layer.pathCount} trazo(s)`
+              }
+              className={`relative flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-md border text-[10px] transition hover:border-foreground/40 ${
+                off ? "opacity-40" : ""
+              }`}
+            >
+              <span
+                className="size-6 rounded border"
+                style={{ backgroundColor: hex }}
+                aria-hidden
+              />
+              <span className="truncate px-0.5 text-muted-foreground">
+                {hex}
+              </span>
+              {off ? (
+                <X className="absolute right-0.5 top-0.5 size-3 text-destructive" />
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Clic en un color para excluirlo o volver a incluirlo en el SVG.
+      </p>
+    </div>
+  );
+}
+
+function FileList({
+  files,
+  onZip,
+}: {
+  files: ResultFile[];
+  onZip?: () => void;
+}) {
+  if (files.length === 0) return null;
+  const total = files.reduce((sum, file) => sum + file.bytes, 0);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-foreground">
+          {files.length} archivo(s) · {formatBytes(total)}
+        </p>
+        {onZip ? (
+          <Button size="sm" variant="outline" onClick={onZip}>
+            <Download className="size-3.5" />
+            ZIP
+          </Button>
+        ) : null}
+      </div>
+      <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+        {files.map((file) => (
+          <div
+            key={file.name}
+            className="flex items-center gap-2 rounded-md border p-2"
+          >
+            {file.color ? (
+              <span
+                className="size-6 shrink-0 rounded border"
+                style={{ backgroundColor: file.color }}
+                aria-hidden
+              />
+            ) : (
+              <span className="flex size-6 shrink-0 items-center justify-center rounded border text-muted-foreground">
+                <Scissors className="size-3.5" />
+              </span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-medium">{file.name}</p>
+              <p className="text-[11px] text-muted-foreground">
+                {file.color ? `${file.color} · ` : ""}
+                {formatBytes(file.bytes)}
+              </p>
+            </div>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={file.onDownload}
+              aria-label={`Descargar ${file.name}`}
+            >
+              <Download className="size-3.5" />
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function ImageTool() {
@@ -106,12 +284,25 @@ export function ImageTool() {
   const [canRedo, setCanRedo] = useState(false);
   const [traceSettings, setTraceSettings] =
     useState<TraceSettings>(DEFAULT_TRACE_SETTINGS);
-  const [svg, setSvg] = useState<string | null>(null);
-  const [layers, setLayers] = useState<ColorLayer[] | null>(null);
-  const [busy, setBusy] = useState<"trace" | "split" | null>(null);
+  const [tab, setTab] = useState<TabValue>("background");
+  const [excludedColors, setExcludedColors] = useState<Set<string>>(new Set());
+  const [traceState, setTraceState] = useState<{
+    key: string;
+    result: TraceResult | null;
+  } | null>(null);
+  const [detectedColors, setDetectedColors] = useState(DEFAULT_COLORS);
 
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
+
+  const syncDetectedColors = useCallback((canvas: HTMLCanvasElement) => {
+    const count = countColors(canvas);
+    setDetectedColors(count);
+    setTraceSettings((settings) => ({
+      ...settings,
+      numberofcolors: clampColorCount(count),
+    }));
+  }, []);
 
   const resetHistory = useCallback(() => {
     historyRef.current = [];
@@ -133,16 +324,18 @@ export function ImageTool() {
         setOriginalCanvas(source);
         setWorkCanvas(work);
         setFileName(file.name);
-        setSvg(null);
-        setLayers(null);
+        setExcludedColors(new Set());
+        setTraceState(null);
+        setTab("background");
         resetHistory();
+        syncDetectedColors(work);
         setStatus("ready");
         setVersion((value) => value + 1);
       } catch {
         toast.error("No se pudo cargar la imagen");
       }
     },
-    [resetHistory]
+    [resetHistory, syncDetectedColors]
   );
 
   const handleRemoveBackground = useCallback(async () => {
@@ -161,9 +354,10 @@ export function ImageTool() {
       const work = createCanvas(cut.width, cut.height);
       get2d(work, true).drawImage(cut, 0, 0);
       setWorkCanvas(work);
-      setSvg(null);
-      setLayers(null);
+      setExcludedColors(new Set());
+      setTraceState(null);
       resetHistory();
+      syncDetectedColors(work);
       setVersion((value) => value + 1);
       setStatus("ready");
       toast.success("Fondo eliminado");
@@ -174,18 +368,19 @@ export function ImageTool() {
     } finally {
       setProgress(null);
     }
-  }, [originalCanvas, resetHistory]);
+  }, [originalCanvas, resetHistory, syncDetectedColors]);
 
   const handleResetEdits = useCallback(() => {
     if (!originalCanvas) return;
     const work = createCanvas(originalCanvas.width, originalCanvas.height);
     get2d(work, true).drawImage(originalCanvas, 0, 0);
     setWorkCanvas(work);
-    setSvg(null);
-    setLayers(null);
+    setExcludedColors(new Set());
+    setTraceState(null);
     resetHistory();
+    syncDetectedColors(work);
     setVersion((value) => value + 1);
-  }, [originalCanvas, resetHistory]);
+  }, [originalCanvas, resetHistory, syncDetectedColors]);
 
   const handleStroke = useCallback((entry: HistoryEntry) => {
     const trimmed = historyRef.current.slice(0, historyIndexRef.current + 1);
@@ -238,88 +433,117 @@ export function ImageTool() {
     }
   }, [workCanvas, fileName]);
 
-  const handleGenerateSvg = useCallback(async () => {
-    if (!workCanvas) return;
-    const ctx = workCanvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
-    setBusy("trace");
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    try {
-      const data = ctx.getImageData(0, 0, workCanvas.width, workCanvas.height);
-      const prepared = prepareTraceImageData(data, traceSettings);
-      const result = tracePreparedImage(prepared, traceSettings);
-      if (!/<path\b/.test(result)) {
-        toast.error("No se detectó ninguna forma. Ajusta el umbral de fondo.");
-        setSvg(null);
-        return;
-      }
-      setSvg(result);
-      toast.success("SVG generado");
-    } catch (error) {
-      console.error(error);
-      toast.error("No se pudo vectorizar la imagen");
-    } finally {
-      setBusy(null);
-    }
-  }, [workCanvas, traceSettings]);
+  const handleNewImage = useCallback(() => {
+    setOriginalCanvas(null);
+    setWorkCanvas(null);
+    setFileName("");
+    setStatus("empty");
+    setTab("background");
+    setExcludedColors(new Set());
+    setTraceState(null);
+    setDetectedColors(DEFAULT_COLORS);
+    setProgress(null);
+    resetHistory();
+  }, [resetHistory]);
 
-  const handleSplitByColor = useCallback(async () => {
-    if (!workCanvas) return;
-    const ctx = workCanvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
-    setBusy("split");
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    try {
-      const data = ctx.getImageData(0, 0, workCanvas.width, workCanvas.height);
-      const prepared = prepareTraceImageData(data, traceSettings);
-      const result = tracePreparedImage(prepared, traceSettings);
-      if (!/<path\b/.test(result)) {
-        toast.error("No se detectó ninguna forma. Ajusta el umbral de fondo.");
-        setSvg(null);
-        setLayers(null);
-        return;
+  const traceKey = useMemo(
+    () => JSON.stringify([version, traceSettings]),
+    [version, traceSettings]
+  );
+
+  useEffect(() => {
+    if (tab === "background" || !workCanvas) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      let result: TraceResult | null = null;
+      try {
+        result = computeTrace(workCanvas, traceSettings);
+      } catch (error) {
+        console.error(error);
       }
-      const colorLayers = splitSvgByColor(
-        result,
-        prepared.width,
-        prepared.height
-      );
-      setSvg(result);
-      setLayers(colorLayers);
-      if (colorLayers.length <= 1) {
-        toast.info("Solo se detectó un color. Prueba aumentando los colores.");
+      setTraceState({ key: traceKey, result });
+    }, TRACE_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [tab, workCanvas, traceKey, traceSettings]);
+
+  const traceResult = traceState ? traceState.result : null;
+  const tracing =
+    tab !== "background" &&
+    workCanvas !== null &&
+    (!traceState || traceState.key !== traceKey);
+
+  const allLayers = useMemo(
+    () =>
+      traceResult
+        ? splitSvgByColor(traceResult.svg, traceResult.width, traceResult.height)
+        : [],
+    [traceResult]
+  );
+
+  const visibleSvg = useMemo(
+    () => (traceResult ? filterSvgByColors(traceResult.svg, excludedColors) : null),
+    [traceResult, excludedColors]
+  );
+
+  const visibleLayers = useMemo(
+    () => allLayers.filter((layer) => !excludedColors.has(rgbToHex(layer.rgb))),
+    [allLayers, excludedColors]
+  );
+
+  const toggleColor = useCallback((hex: string) => {
+    setExcludedColors((prev) => {
+      const next = new Set(prev);
+      if (next.has(hex)) {
+        next.delete(hex);
       } else {
-        toast.success(`${colorLayers.length} capas de color generadas`);
+        next.add(hex);
       }
-    } catch (error) {
-      console.error(error);
-      toast.error("No se pudo dividir por color");
-    } finally {
-      setBusy(null);
-    }
-  }, [workCanvas, traceSettings]);
+      return next;
+    });
+  }, []);
 
-  const handleDownloadSvg = useCallback(() => {
-    if (!svg) return;
-    downloadText(svg, `${baseName(fileName)}.svg`);
-  }, [svg, fileName]);
+  const maxColors = Math.max(
+    2,
+    Math.min(MAX_COLORS, detectedColors || MAX_COLORS)
+  );
 
-  const handleDownloadLayer = useCallback(
-    (layer: ColorLayer, index: number) => {
-      const hex = rgbToHex(layer.rgb).replace("#", "");
-      downloadText(layer.svg, `${baseName(fileName)}-color-${index + 1}-${hex}.svg`);
-    },
-    [fileName]
+  const vectorFiles = useMemo<ResultFile[]>(() => {
+    if (!visibleSvg || visibleLayers.length === 0) return [];
+    const name = `${baseName(fileName)}.svg`;
+    return [
+      {
+        name,
+        bytes: new Blob([visibleSvg]).size,
+        onDownload: () => downloadText(visibleSvg, name),
+      },
+    ];
+  }, [visibleSvg, visibleLayers.length, fileName]);
+
+  const layerFiles = useMemo<ResultFile[]>(
+    () =>
+      visibleLayers.map((layer) => {
+        const hex = rgbToHex(layer.rgb).replace("#", "");
+        const name = `${baseName(fileName)}-${hex}.svg`;
+        return {
+          name,
+          bytes: new Blob([layer.svg]).size,
+          color: `#${hex}`,
+          onDownload: () => downloadText(layer.svg, name),
+        };
+      }),
+    [visibleLayers, fileName]
   );
 
   const handleDownloadAllLayers = useCallback(async () => {
-    if (!layers || layers.length === 0) return;
+    if (visibleLayers.length === 0) return;
     try {
       await downloadZip(
-        layers.map((layer, index) => ({
-          name: `${baseName(fileName)}-color-${index + 1}-${rgbToHex(
-            layer.rgb
-          ).replace("#", "")}.svg`,
+        visibleLayers.map((layer) => ({
+          name: `${baseName(fileName)}-${rgbToHex(layer.rgb).replace("#", "")}.svg`,
           content: layer.svg,
         })),
         `${baseName(fileName)}-capas.zip`
@@ -328,20 +552,7 @@ export function ImageTool() {
     } catch {
       toast.error("No se pudo crear el ZIP");
     }
-  }, [layers, fileName]);
-
-  const handleNewImage = useCallback(() => {
-    setOriginalCanvas(null);
-    setWorkCanvas(null);
-    setFileName("");
-    setStatus("empty");
-    setSvg(null);
-    setLayers(null);
-    setProgress(null);
-    resetHistory();
-  }, [resetHistory]);
-
-  const busyLabel = busy === "trace" ? "Vectorizando" : "Dividiendo colores";
+  }, [visibleLayers, fileName]);
 
   if (status === "empty") {
     return (
@@ -392,15 +603,23 @@ export function ImageTool() {
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
             <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
-              {tool === "wand" ? (
+              {tab !== "background" ? (
+                <Scissors className="size-4" />
+              ) : tool === "wand" ? (
                 <Wand2 className="size-4" />
               ) : (
                 <Paintbrush className="size-4" />
               )}
               <span className="font-medium text-foreground">
-                {tool === "wand" ? "Varita mágica" : "Pincel"}
+                {tab !== "background"
+                  ? "Vista vectorial"
+                  : tool === "wand"
+                    ? "Varita mágica"
+                    : "Pincel"}
               </span>
-              <span>· {brush.mode === "erase" ? "Quitar" : "Mantener"}</span>
+              {tab === "background" ? (
+                <span>· {brush.mode === "erase" ? "Quitar" : "Mantener"}</span>
+              ) : null}
             </div>
 
             <div className="ml-auto flex items-center gap-1">
@@ -428,16 +647,40 @@ export function ImageTool() {
           </div>
 
           <div className="relative">
-            <EditorCanvas
-              workCanvas={workCanvas}
-              originalCanvas={originalCanvas}
-              tool={tool}
-              brush={brush}
-              tolerance={tolerance}
-              enabled={status === "ready" && busy === null}
-              version={version}
-              onStroke={handleStroke}
-            />
+            {tab === "background" ? (
+              <EditorCanvas
+                workCanvas={workCanvas}
+                originalCanvas={originalCanvas}
+                tool={tool}
+                brush={brush}
+                tolerance={tolerance}
+                enabled={status === "ready"}
+                version={version}
+                onStroke={handleStroke}
+              />
+            ) : traceResult && visibleLayers.length > 0 && visibleSvg ? (
+              <SvgPreview
+                svg={visibleSvg}
+                width={traceResult.width}
+                height={traceResult.height}
+                resetKey={workCanvas}
+              />
+            ) : (
+              <div className="flex min-h-[50vh] items-center justify-center rounded-xl border p-6 text-center text-sm text-muted-foreground">
+                {tracing
+                  ? "Vectorizando…"
+                  : traceResult
+                    ? "Todos los colores están excluidos."
+                    : "No se detectaron formas. Ajusta el umbral de fondo o los colores."}
+              </div>
+            )}
+
+            {tracing && traceResult ? (
+              <div className="absolute left-3 top-3 z-10 rounded-md border bg-background/90 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur">
+                Vectorizando…
+              </div>
+            ) : null}
+
             {status === "removing" ? (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/70 backdrop-blur-sm">
                 <Loader2 className="size-8 animate-spin text-primary" />
@@ -449,21 +692,18 @@ export function ImageTool() {
                 </p>
               </div>
             ) : null}
-            {busy ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/70 backdrop-blur-sm">
-                <Loader2 className="size-8 animate-spin text-primary" />
-                <p className="text-sm font-medium">{busyLabel}…</p>
-              </div>
-            ) : null}
           </div>
         </div>
 
         <div>
-          <Tabs defaultValue="background" className="w-full">
-            <TabsList className="grid w-full grid-cols-3">
+          <Tabs
+            value={tab}
+            onValueChange={(value: string) => setTab(value as TabValue)}
+            className="w-full"
+          >
+            <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="background">Fondo</TabsTrigger>
               <TabsTrigger value="vector">Vector</TabsTrigger>
-              <TabsTrigger value="colors">Colores</TabsTrigger>
             </TabsList>
 
             <TabsContent value="background" className="mt-4 space-y-4">
@@ -496,7 +736,6 @@ export function ImageTool() {
                       </p>
                     </div>
                   ) : null}
-
                 </CardContent>
               </Card>
 
@@ -631,7 +870,8 @@ export function ImageTool() {
                     Vectorizar a SVG
                   </CardTitle>
                   <CardDescription>
-                    Convierte la imagen en trazos vectoriales editables.
+                    La vista previa de la izquierda se actualiza sola. Ajusta y
+                    observa el resultado.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -666,9 +906,9 @@ export function ImageTool() {
                       </div>
                       <Slider
                         min={2}
-                        max={32}
+                        max={maxColors}
                         step={1}
-                        value={[traceSettings.numberofcolors]}
+                        value={[Math.min(traceSettings.numberofcolors, maxColors)]}
                         onValueChange={(values: number[]) =>
                           setTraceSettings((settings) => ({
                             ...settings,
@@ -676,6 +916,14 @@ export function ImageTool() {
                           }))
                         }
                       />
+                      <p className="text-[11px] text-muted-foreground">
+                        {detectedColors > 0
+                          ? detectedColors > MAX_COLORS
+                            ? `La imagen tiene más de ${MAX_COLORS} colores distintos.`
+                            : `Se detectaron ~${detectedColors} colores distintos.`
+                          : "Cuántos colores distintos tendrá el SVG."}{" "}
+                        Más colores = más detalle y más peso.
+                      </p>
                     </div>
                   ) : null}
 
@@ -698,6 +946,11 @@ export function ImageTool() {
                         }))
                       }
                     />
+                    <p className="text-[11px] text-muted-foreground">
+                      Descarta formas más pequeñas que este valor (ruido).
+                      Súbelo para un SVG más ligero; bájalo para conservar
+                      detalles finos.
+                    </p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -719,6 +972,10 @@ export function ImageTool() {
                         }))
                       }
                     />
+                    <p className="text-[11px] text-muted-foreground">
+                      Difumina antes de vectorizar para bordes más suaves y
+                      limpios.
+                    </p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -747,159 +1004,33 @@ export function ImageTool() {
                     </p>
                   </div>
 
-                  <Button
-                    className="w-full"
-                    onClick={handleGenerateSvg}
-                    disabled={busy !== null}
-                  >
-                    {busy === "trace" ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Scissors className="size-4" />
-                    )}
-                    Generar SVG
-                  </Button>
+                  <Separator />
 
-                  {svg ? (
-                    <div className="space-y-2">
-                      <div className="flex max-h-48 items-center justify-center overflow-hidden rounded-md border bg-white p-2">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={svgToDataUrl(svg)}
-                          alt="Previsualización del SVG"
-                          className="max-h-44 w-auto"
-                        />
-                      </div>
-                      <Button
-                        variant="outline"
-                        className="w-full"
-                        onClick={handleDownloadSvg}
-                      >
-                        <Download className="size-4" />
-                        Descargar SVG
-                      </Button>
-                    </div>
-                  ) : null}
-                </CardContent>
-              </Card>
-            </TabsContent>
+                  <ColorPalette
+                    layers={allLayers}
+                    excluded={excludedColors}
+                    onToggle={toggleColor}
+                  />
 
-            <TabsContent value="colors" className="mt-4 space-y-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <Palette className="size-4" />
-                    Dividir por color
-                  </CardTitle>
-                  <CardDescription>
-                    Genera un SVG por cada color detectado, ideal para impresión
-                    multicolor o por capas.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label>Colores a detectar</Label>
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {traceSettings.numberofcolors}
-                      </span>
-                    </div>
-                    <Slider
-                      min={2}
-                      max={24}
-                      step={1}
-                      value={[traceSettings.numberofcolors]}
-                      onValueChange={(values: number[]) =>
-                        setTraceSettings((settings) => ({
-                          ...settings,
-                          numberofcolors: values[0],
-                        }))
-                      }
-                    />
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Vector completo
+                    </p>
+                    <FileList files={vectorFiles} />
                   </div>
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="colors-alpha">Umbral de fondo</Label>
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {traceSettings.alphaThreshold}
-                      </span>
-                    </div>
-                    <Slider
-                      id="colors-alpha"
-                      min={0}
-                      max={255}
-                      step={1}
-                      value={[traceSettings.alphaThreshold]}
-                      onValueChange={(values: number[]) =>
-                        setTraceSettings((settings) => ({
-                          ...settings,
-                          alphaThreshold: values[0],
-                        }))
-                      }
+                  <Separator />
+
+                  <div className="space-y-2">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Palette className="size-3.5" />
+                      Separado por colores
+                    </p>
+                    <FileList
+                      files={layerFiles}
+                      onZip={handleDownloadAllLayers}
                     />
                   </div>
-
-                  <Button
-                    className="w-full"
-                    onClick={handleSplitByColor}
-                    disabled={busy !== null}
-                  >
-                    {busy === "split" ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Palette className="size-4" />
-                    )}
-                    Dividir por color
-                  </Button>
-
-                  {layers && layers.length > 0 ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <p className="text-xs font-medium text-muted-foreground">
-                          {layers.length} capa(s)
-                        </p>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={handleDownloadAllLayers}
-                        >
-                          <Download className="size-3.5" />
-                          ZIP
-                        </Button>
-                      </div>
-                      <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
-                        {layers.map((layer, index) => (
-                          <div
-                            key={`${layer.color}-${index}`}
-                            className="flex items-center gap-2 rounded-md border p-2"
-                          >
-                            <span
-                              className="size-6 shrink-0 rounded border"
-                              style={{ backgroundColor: rgbToHex(layer.rgb) }}
-                              aria-hidden
-                            />
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-xs font-medium">
-                                {rgbToHex(layer.rgb)}
-                              </p>
-                              <p className="text-[11px] text-muted-foreground">
-                                {layer.pathCount} trazo(s)
-                              </p>
-                            </div>
-                            <Button
-                              size="icon-sm"
-                              variant="ghost"
-                              onClick={() => handleDownloadLayer(layer, index)}
-                              aria-label={`Descargar capa ${rgbToHex(layer.rgb)}`}
-                            >
-                              <Download className="size-3.5" />
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
                 </CardContent>
               </Card>
             </TabsContent>
