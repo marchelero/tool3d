@@ -14,6 +14,7 @@ import {
   Scissors,
   Sparkles,
   Undo2,
+  Wand2,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -98,6 +99,8 @@ export function ImageTool() {
     mode: "erase",
     size: 40,
   });
+  const [tool, setTool] = useState<"brush" | "wand">("brush");
+  const [tolerance, setTolerance] = useState(20);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -388,54 +391,19 @@ export function ImageTool() {
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
-            <div className="flex items-center gap-1 rounded-md bg-muted p-0.5">
-              <Button
-                size="sm"
-                variant={brush.mode === "erase" ? "default" : "ghost"}
-                aria-pressed={brush.mode === "erase"}
-                onClick={() => setBrush((value) => ({ ...value, mode: "erase" }))}
-              >
-                <Eraser className="size-3.5" />
-                Borrar
-              </Button>
-              <Button
-                size="sm"
-                variant={brush.mode === "restore" ? "default" : "ghost"}
-                aria-pressed={brush.mode === "restore"}
-                onClick={() =>
-                  setBrush((value) => ({ ...value, mode: "restore" }))
-                }
-              >
-                <Paintbrush className="size-3.5" />
-                Restaurar
-              </Button>
-            </div>
-
-            <Separator orientation="vertical" className="mx-1 h-6" />
-
-            <div className="flex min-w-40 flex-1 items-center gap-2">
-              <Label htmlFor="brush-size" className="text-xs text-muted-foreground">
-                Pincel
-              </Label>
-              <Slider
-                id="brush-size"
-                min={8}
-                max={200}
-                step={2}
-                value={[brush.size]}
-                onValueChange={(values: number[]) =>
-                  setBrush((value) => ({ ...value, size: values[0] }))
-                }
-                className="flex-1"
-              />
-              <span className="w-8 text-right text-xs tabular-nums text-muted-foreground">
-                {brush.size}
+            <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+              {tool === "wand" ? (
+                <Wand2 className="size-4" />
+              ) : (
+                <Paintbrush className="size-4" />
+              )}
+              <span className="font-medium text-foreground">
+                {tool === "wand" ? "Varita mágica" : "Pincel"}
               </span>
+              <span>· {brush.mode === "erase" ? "Quitar" : "Mantener"}</span>
             </div>
 
-            <Separator orientation="vertical" className="mx-1 h-6" />
-
-            <div className="flex items-center gap-1">
+            <div className="ml-auto flex items-center gap-1">
               <Button
                 size="icon-sm"
                 variant="ghost"
@@ -463,7 +431,9 @@ export function ImageTool() {
             <EditorCanvas
               workCanvas={workCanvas}
               originalCanvas={originalCanvas}
+              tool={tool}
               brush={brush}
+              tolerance={tolerance}
               enabled={status === "ready" && busy === null}
               version={version}
               onStroke={handleStroke}
@@ -527,6 +497,118 @@ export function ImageTool() {
                     </div>
                   ) : null}
 
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Wand2 className="size-4" />
+                    Retoque manual
+                  </CardTitle>
+                  <CardDescription>
+                    Borra o recupera zonas con el pincel o la varita mágica.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label>Herramienta</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        size="sm"
+                        variant={tool === "brush" ? "default" : "outline"}
+                        aria-pressed={tool === "brush"}
+                        onClick={() => setTool("brush")}
+                      >
+                        <Paintbrush className="size-3.5" />
+                        Pincel
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={tool === "wand" ? "default" : "outline"}
+                        aria-pressed={tool === "wand"}
+                        onClick={() => setTool("wand")}
+                      >
+                        <Wand2 className="size-3.5" />
+                        Varita
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label>Acción</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        size="sm"
+                        variant={brush.mode === "erase" ? "default" : "outline"}
+                        aria-pressed={brush.mode === "erase"}
+                        onClick={() =>
+                          setBrush((value) => ({ ...value, mode: "erase" }))
+                        }
+                      >
+                        <Eraser className="size-3.5" />
+                        Quitar
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={brush.mode === "restore" ? "default" : "outline"}
+                        aria-pressed={brush.mode === "restore"}
+                        onClick={() =>
+                          setBrush((value) => ({ ...value, mode: "restore" }))
+                        }
+                      >
+                        <Paintbrush className="size-3.5" />
+                        Mantener
+                      </Button>
+                    </div>
+                  </div>
+
+                  {tool === "brush" ? (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="brush-size">Tamaño del pincel</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {brush.size}px
+                        </span>
+                      </div>
+                      <Slider
+                        id="brush-size"
+                        min={8}
+                        max={200}
+                        step={2}
+                        value={[brush.size]}
+                        onValueChange={(values: number[]) =>
+                          setBrush((value) => ({ ...value, size: values[0] }))
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="wand-tolerance">Tolerancia</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {tolerance}%
+                        </span>
+                      </div>
+                      <Slider
+                        id="wand-tolerance"
+                        min={0}
+                        max={60}
+                        step={1}
+                        value={[tolerance]}
+                        onValueChange={(values: number[]) =>
+                          setTolerance(values[0])
+                        }
+                      />
+                    </div>
+                  )}
+
+                  <p className="text-xs text-muted-foreground">
+                    {tool === "wand"
+                      ? "Toca una zona de la imagen para seleccionar y quitar (o mantener) regiones de color similar. Aumenta la tolerancia para abarcar más tonos."
+                      : "Pinta sobre la imagen para quitar o mantener partes."}
+                  </p>
+
                   <Separator />
 
                   <Button
@@ -537,12 +619,6 @@ export function ImageTool() {
                     <RotateCcw className="size-4" />
                     Volver a la original
                   </Button>
-
-                  <p className="text-xs text-muted-foreground">
-                    Usa el pincel <strong>Borrar</strong> para eliminar restos de
-                    fondo y <strong>Restaurar</strong> para recuperar partes de
-                    la imagen que se hayan borrado por error.
-                  </p>
                 </CardContent>
               </Card>
             </TabsContent>
