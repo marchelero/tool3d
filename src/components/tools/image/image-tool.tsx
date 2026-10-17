@@ -48,10 +48,11 @@ import {
 import { removeBackgroundClient } from "@/lib/image/background";
 import {
   DEFAULT_TRACE_SETTINGS,
+  prepareTraceImageData,
   rgbToHex,
   splitSvgByColor,
   svgToDataUrl,
-  traceImageDataToSvg,
+  tracePreparedImage,
   type ColorLayer,
   type TraceSettings,
 } from "@/lib/image/trace";
@@ -242,7 +243,13 @@ export function ImageTool() {
     await new Promise((resolve) => setTimeout(resolve, 30));
     try {
       const data = ctx.getImageData(0, 0, workCanvas.width, workCanvas.height);
-      const result = traceImageDataToSvg(data, traceSettings);
+      const prepared = prepareTraceImageData(data, traceSettings);
+      const result = tracePreparedImage(prepared, traceSettings);
+      if (!/<path\b/.test(result)) {
+        toast.error("No se detectó ninguna forma. Ajusta el umbral de fondo.");
+        setSvg(null);
+        return;
+      }
       setSvg(result);
       toast.success("SVG generado");
     } catch (error) {
@@ -261,11 +268,18 @@ export function ImageTool() {
     await new Promise((resolve) => setTimeout(resolve, 30));
     try {
       const data = ctx.getImageData(0, 0, workCanvas.width, workCanvas.height);
-      const result = traceImageDataToSvg(data, traceSettings);
+      const prepared = prepareTraceImageData(data, traceSettings);
+      const result = tracePreparedImage(prepared, traceSettings);
+      if (!/<path\b/.test(result)) {
+        toast.error("No se detectó ninguna forma. Ajusta el umbral de fondo.");
+        setSvg(null);
+        setLayers(null);
+        return;
+      }
       const colorLayers = splitSvgByColor(
         result,
-        workCanvas.width,
-        workCanvas.height
+        prepared.width,
+        prepared.height
       );
       setSvg(result);
       setLayers(colorLayers);
@@ -631,6 +645,32 @@ export function ImageTool() {
                     />
                   </div>
 
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="vector-alpha">Umbral de fondo</Label>
+                      <span className="text-xs tabular-nums text-muted-foreground">
+                        {traceSettings.alphaThreshold}
+                      </span>
+                    </div>
+                    <Slider
+                      id="vector-alpha"
+                      min={0}
+                      max={255}
+                      step={1}
+                      value={[traceSettings.alphaThreshold]}
+                      onValueChange={(values: number[]) =>
+                        setTraceSettings((settings) => ({
+                          ...settings,
+                          alphaThreshold: values[0],
+                        }))
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Súbelo si queda un fondo semitransparente; bájalo si
+                      desaparecen detalles finos.
+                    </p>
+                  </div>
+
                   <Button
                     className="w-full"
                     onClick={handleGenerateSvg}
@@ -697,6 +737,28 @@ export function ImageTool() {
                         setTraceSettings((settings) => ({
                           ...settings,
                           numberofcolors: values[0],
+                        }))
+                      }
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="colors-alpha">Umbral de fondo</Label>
+                      <span className="text-xs tabular-nums text-muted-foreground">
+                        {traceSettings.alphaThreshold}
+                      </span>
+                    </div>
+                    <Slider
+                      id="colors-alpha"
+                      min={0}
+                      max={255}
+                      step={1}
+                      value={[traceSettings.alphaThreshold]}
+                      onValueChange={(values: number[]) =>
+                        setTraceSettings((settings) => ({
+                          ...settings,
+                          alphaThreshold: values[0],
                         }))
                       }
                     />

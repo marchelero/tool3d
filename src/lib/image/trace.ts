@@ -7,6 +7,7 @@ export interface TraceSettings {
   ltres: number;
   qtres: number;
   blurradius: number;
+  alphaThreshold: number;
 }
 
 export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
@@ -16,12 +17,14 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
   ltres: 1,
   qtres: 1,
   blurradius: 0,
+  alphaThreshold: 128,
 };
 
+const BACKGROUND_SENTINEL = { r: 255, g: 0, b: 255 };
+const CONTENT_PADDING = 2;
+
 function buildOptions(settings: TraceSettings): TraceOptions {
-  return {
-    numberofcolors: settings.mode === "mono" ? 2 : settings.numberofcolors,
-    colorsampling: 2,
+  const base: TraceOptions = {
     pathomit: settings.pathomit,
     ltres: settings.ltres,
     qtres: settings.qtres,
@@ -31,14 +34,134 @@ function buildOptions(settings: TraceSettings): TraceOptions {
     viewbox: false,
     desc: false,
     linefilter: true,
+    strokewidth: 0,
   };
+
+  if (settings.mode === "mono") {
+    return {
+      ...base,
+      colorsampling: 0,
+      pal: [
+        { r: 0, g: 0, b: 0, a: 255 },
+        { ...BACKGROUND_SENTINEL, a: 255 },
+      ],
+    };
+  }
+
+  return {
+    ...base,
+    colorsampling: 2,
+    numberofcolors: Math.min(64, settings.numberofcolors + 1),
+  };
+}
+
+interface Bounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function computeAlphaBounds(
+  imgData: ImageData,
+  threshold: number
+): Bounds | null {
+  const { data, width, height } = imgData;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] >= threshold) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0 || maxY < 0) return null;
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
+}
+
+export function prepareTraceImageData(
+  imgData: ImageData,
+  settings: TraceSettings
+): ImageData {
+  const threshold = Math.max(0, Math.min(255, settings.alphaThreshold));
+  const bounds = computeAlphaBounds(imgData, threshold);
+
+  if (!bounds) {
+    const empty = new ImageData(1, 1);
+    empty.data[0] = BACKGROUND_SENTINEL.r;
+    empty.data[1] = BACKGROUND_SENTINEL.g;
+    empty.data[2] = BACKGROUND_SENTINEL.b;
+    empty.data[3] = 255;
+    return empty;
+  }
+
+  const x0 = Math.max(0, bounds.x - CONTENT_PADDING);
+  const y0 = Math.max(0, bounds.y - CONTENT_PADDING);
+  const x1 = Math.min(
+    imgData.width,
+    bounds.x + bounds.width + CONTENT_PADDING
+  );
+  const y1 = Math.min(
+    imgData.height,
+    bounds.y + bounds.height + CONTENT_PADDING
+  );
+  const width = x1 - x0;
+  const height = y1 - y0;
+
+  const out = new ImageData(width, height);
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const srcIndex = ((y0 + row) * imgData.width + (x0 + col)) * 4;
+      const dstIndex = (row * width + col) * 4;
+      const alpha = imgData.data[srcIndex + 3];
+
+      if (alpha < threshold) {
+        out.data[dstIndex] = BACKGROUND_SENTINEL.r;
+        out.data[dstIndex + 1] = BACKGROUND_SENTINEL.g;
+        out.data[dstIndex + 2] = BACKGROUND_SENTINEL.b;
+      } else if (settings.mode === "mono") {
+        out.data[dstIndex] = 0;
+        out.data[dstIndex + 1] = 0;
+        out.data[dstIndex + 2] = 0;
+      } else {
+        out.data[dstIndex] = imgData.data[srcIndex];
+        out.data[dstIndex + 1] = imgData.data[srcIndex + 1];
+        out.data[dstIndex + 2] = imgData.data[srcIndex + 2];
+      }
+      out.data[dstIndex + 3] = 255;
+    }
+  }
+
+  return out;
+}
+
+export function tracePreparedImage(
+  prepared: ImageData,
+  settings: TraceSettings
+): string {
+  const svg = ImageTracer.imagedataToSVG(prepared, buildOptions(settings));
+  return stripBackgroundPaths(svg);
 }
 
 export function traceImageDataToSvg(
   imgData: ImageData,
   settings: TraceSettings
 ): string {
-  return ImageTracer.imagedataToSVG(imgData, buildOptions(settings));
+  return tracePreparedImage(prepareTraceImageData(imgData, settings), settings);
 }
 
 export interface ColorLayer {
@@ -77,6 +200,21 @@ function parseRgb(color: string): { r: number; g: number; b: number } {
   return { r: 0, g: 0, b: 0 };
 }
 
+function isBackgroundColor(color: string): boolean {
+  const { r, g, b } = parseRgb(color);
+  return r > 180 && g < 90 && b > 180;
+}
+
+export function stripBackgroundPaths(svg: string): string {
+  return svg.replace(PATH_REGEX, (path) => {
+    const match = path.match(FILL_REGEX);
+    if (match && isBackgroundColor(match[1])) {
+      return "";
+    }
+    return path;
+  });
+}
+
 export function rgbToHex({ r, g, b }: { r: number; g: number; b: number }): string {
   const toHex = (value: number) =>
     Math.max(0, Math.min(255, Math.round(value)))
@@ -92,6 +230,9 @@ export function splitSvgByColor(svg: string, width: number, height: number): Col
   for (const path of paths) {
     const match = path.match(FILL_REGEX);
     const color = match ? match[1] : "rgb(0,0,0)";
+    if (isBackgroundColor(color)) {
+      continue;
+    }
     const clean = stripStroke(path);
     const list = groups.get(color) ?? [];
     list.push(clean);
