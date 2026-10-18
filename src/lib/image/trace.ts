@@ -18,6 +18,8 @@ export interface TraceSettings {
   rightangleenhance: boolean;
   strokewidth: number;
   alphaThreshold: number;
+  removeBackground: boolean;
+  backgroundTolerance: number;
 }
 
 export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
@@ -31,6 +33,8 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
   rightangleenhance: false,
   strokewidth: 1,
   alphaThreshold: 128,
+  removeBackground: true,
+  backgroundTolerance: 20,
 };
 
 export type TracePreset = "logo" | "detailed" | "illustration" | "silhouette";
@@ -147,9 +151,145 @@ interface Bounds {
   height: number;
 }
 
+const MAX_COLOR_DISTANCE = Math.sqrt(3) * 255;
+
+function detectBorderColor(
+  imgData: ImageData,
+  alphaThreshold: number
+): PaletteColor | null {
+  const { data, width, height } = imgData;
+  const counts = new Int32Array(4096);
+  const sumR = new Float64Array(4096);
+  const sumG = new Float64Array(4096);
+  const sumB = new Float64Array(4096);
+  let total = 0;
+
+  const visit = (x: number, y: number) => {
+    const offset = (y * width + x) * 4;
+    if (data[offset + 3] < alphaThreshold) return;
+    total += 1;
+    const key =
+      ((data[offset] >> 4) << 8) |
+      ((data[offset + 1] >> 4) << 4) |
+      (data[offset + 2] >> 4);
+    counts[key] += 1;
+    sumR[key] += data[offset];
+    sumG[key] += data[offset + 1];
+    sumB[key] += data[offset + 2];
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    visit(x, 0);
+    if (height > 1) visit(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y += 1) {
+    visit(0, y);
+    if (width > 1) visit(width - 1, y);
+  }
+
+  if (total === 0) return null;
+
+  let bestKey = -1;
+  let bestCount = 0;
+  for (let key = 0; key < counts.length; key += 1) {
+    if (counts[key] > bestCount) {
+      bestCount = counts[key];
+      bestKey = key;
+    }
+  }
+
+  if (bestKey < 0 || bestCount / total < 0.3) return null;
+
+  return {
+    r: Math.round(sumR[bestKey] / bestCount),
+    g: Math.round(sumG[bestKey] / bestCount),
+    b: Math.round(sumB[bestKey] / bestCount),
+  };
+}
+
+function buildBackgroundMask(
+  imgData: ImageData,
+  background: PaletteColor,
+  tolerance: number,
+  alphaThreshold: number
+): Uint8Array | null {
+  const { data, width, height } = imgData;
+  const maxDistance =
+    (Math.max(0, Math.min(100, tolerance)) / 100) * MAX_COLOR_DISTANCE;
+  const limit = maxDistance * maxDistance;
+  const mask = new Uint8Array(width * height);
+  const stack = new Int32Array(width * height);
+  let top = 0;
+  let masked = 0;
+  let opaque = 0;
+
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] >= alphaThreshold) opaque += 1;
+  }
+
+  const matches = (index: number) => {
+    const offset = index * 4;
+    if (data[offset + 3] < alphaThreshold) return true;
+    const dr = data[offset] - background.r;
+    const dg = data[offset + 1] - background.g;
+    const db = data[offset + 2] - background.b;
+    return dr * dr + dg * dg + db * db <= limit;
+  };
+
+  const push = (index: number) => {
+    if (mask[index] === 1) return;
+    if (!matches(index)) return;
+    mask[index] = 1;
+    masked += 1;
+    stack[top++] = index;
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    push(x);
+    if (height > 1) push((height - 1) * width + x);
+  }
+  for (let y = 1; y < height - 1; y += 1) {
+    push(y * width);
+    if (width > 1) push(y * width + width - 1);
+  }
+
+  while (top > 0) {
+    const index = stack[--top];
+    const x = index % width;
+    if (x > 0) push(index - 1);
+    if (x < width - 1) push(index + 1);
+    if (index >= width) push(index - width);
+    if (index < width * (height - 1)) push(index + width);
+  }
+
+  if (masked === 0) return null;
+  if (opaque > 0 && masked / opaque >= 0.995) return null;
+
+  return mask;
+}
+
+function hasAlphaBackground(
+  imgData: ImageData,
+  alphaThreshold: number
+): boolean {
+  const { data } = imgData;
+  const total = data.length / 4;
+  let transparent = 0;
+
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] < alphaThreshold) {
+      transparent += 1;
+      if (transparent / total >= 0.02) return true;
+    }
+  }
+
+  return false;
+}
+
 function computeAlphaBounds(
   imgData: ImageData,
-  threshold: number
+  threshold: number,
+  mask: Uint8Array | null = null
 ): Bounds | null {
   const { data, width, height } = imgData;
   let minX = width;
@@ -159,7 +299,9 @@ function computeAlphaBounds(
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] >= threshold) {
+      const index = y * width + x;
+      if (mask !== null && mask[index] === 1) continue;
+      if (data[index * 4 + 3] >= threshold) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
@@ -183,10 +325,22 @@ export function prepareTraceImageData(
   settings: TraceSettings
 ): ImageData {
   const threshold = Math.max(0, Math.min(255, settings.alphaThreshold));
+  const background =
+    settings.removeBackground && !hasAlphaBackground(imgData, threshold)
+      ? detectBorderColor(imgData, threshold)
+      : null;
+  const backgroundMask = background
+    ? buildBackgroundMask(
+        imgData,
+        background,
+        settings.backgroundTolerance,
+        threshold
+      )
+    : null;
   const bounds =
     settings.mode === "mono-invert"
       ? { x: 0, y: 0, width: imgData.width, height: imgData.height }
-      : computeAlphaBounds(imgData, threshold);
+      : computeAlphaBounds(imgData, threshold, backgroundMask);
 
   if (!bounds) {
     const empty = new ImageData(1, 1);
@@ -216,7 +370,10 @@ export function prepareTraceImageData(
       const srcIndex = ((y0 + row) * imgData.width + (x0 + col)) * 4;
       const dstIndex = (row * width + col) * 4;
       const alpha = imgData.data[srcIndex + 3];
-      const isBackground = alpha < threshold;
+      const isBackground =
+        alpha < threshold ||
+        (backgroundMask !== null &&
+          backgroundMask[(y0 + row) * imgData.width + (x0 + col)] === 1);
 
       if (settings.mode === "mono-invert") {
         if (isBackground) {
@@ -267,7 +424,8 @@ interface ColorBin extends PaletteColor {
 
 function collectColorBins(
   imgData: ImageData,
-  alphaThreshold: number
+  alphaThreshold: number,
+  mask: Uint8Array | null = null
 ): { bins: ColorBin[]; total: number } {
   const { data } = imgData;
   const counts = new Int32Array(4096);
@@ -278,6 +436,7 @@ function collectColorBins(
 
   for (let i = 0; i < data.length; i += 4) {
     if (data[i + 3] < alphaThreshold) continue;
+    if (mask !== null && mask[i / 4] === 1) continue;
     total += 1;
     const key =
       ((data[i] >> 4) << 8) | ((data[i + 1] >> 4) << 4) | (data[i + 2] >> 4);
@@ -364,10 +523,25 @@ export function estimateColorCount(
   imgData: ImageData,
   alphaThreshold: number
 ): number {
-  const { bins, total } = collectColorBins(imgData, alphaThreshold);
+  const threshold = Math.max(0, Math.min(255, alphaThreshold));
+  const background = hasAlphaBackground(imgData, threshold)
+    ? null
+    : detectBorderColor(imgData, threshold);
+  const mask = background
+    ? buildBackgroundMask(
+        imgData,
+        background,
+        DEFAULT_TRACE_SETTINGS.backgroundTolerance,
+        threshold
+      )
+    : null;
+  const { bins, total } = collectColorBins(imgData, threshold, mask);
   if (total === 0) return 0;
   const minPixels = Math.max(1, Math.floor(total * 0.005));
-  return bins.reduce((count, bin) => (bin.count >= minPixels ? count + 1 : count), 0);
+  return bins.reduce(
+    (count, bin) => (bin.count >= minPixels ? count + 1 : count),
+    0
+  );
 }
 
 export function buildColorPalette(

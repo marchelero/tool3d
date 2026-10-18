@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  type SetStateAction,
   useCallback,
   useEffect,
   useMemo,
@@ -8,9 +9,11 @@ import {
   useState,
 } from "react";
 import { defineStepper } from "@stepperize/react";
+import Link from "next/link";
 import { toast } from "sonner";
 import {
   ChevronRight,
+  Coffee,
   Crop,
   Download,
   Eraser,
@@ -18,6 +21,7 @@ import {
   FlipVertical2,
   ImageDown,
   ImagePlus,
+  KeyRound,
   Layers,
   Loader2,
   Lock,
@@ -96,9 +100,22 @@ type SizeUnit = "px" | "cm" | "mm";
 type EditSection = "size" | "bg" | "export";
 type VectorSection = "style" | "detail" | "export";
 
+interface SettingsSnapshot {
+  settings: TraceSettings;
+  excluded: string[];
+}
+
+interface SettingsEdit {
+  before: SettingsSnapshot;
+  after: SettingsSnapshot;
+}
+
+const SETTINGS_HISTORY_DELAY = 600;
+
 const { useStepper } = defineStepper([
   { id: "background", title: "Editar" },
   { id: "vector", title: "Vector" },
+  { id: "convert", title: "Convertir" },
 ] as const);
 
 const TOOL_DESCRIPTION =
@@ -383,10 +400,11 @@ export function ImageTool() {
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
-  const [traceSettings, setTraceSettings] =
+  const [traceSettings, setTraceSettingsRaw] =
     useState<TraceSettings>(DEFAULT_TRACE_SETTINGS);
   const stepper = useStepper();
   const tab = stepper.id;
+  const vectorMode = tab !== "background";
   const [excludedColors, setExcludedColors] = useState<Set<string>>(new Set());
   const [traceState, setTraceState] = useState<{
     key: string;
@@ -418,13 +436,20 @@ export function ImageTool() {
 
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
+  const settingsHistoryRef = useRef<SettingsEdit[]>([]);
+  const settingsIndexRef = useRef(-1);
+  const pendingSettingsRef = useRef<{ before: SettingsSnapshot } | null>(null);
+  const settingsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [canUndoSettings, setCanUndoSettings] = useState(false);
+  const [canRedoSettings, setCanRedoSettings] = useState(false);
+  const [hasPendingSettings, setHasPendingSettings] = useState(false);
   const pristineRef = useRef<HTMLCanvasElement | null>(null);
   const fullResRef = useRef<HTMLCanvasElement | null>(null);
 
   const syncDetectedColors = useCallback((canvas: HTMLCanvasElement) => {
     const count = countColors(canvas);
     setDetectedColors(count);
-    setTraceSettings((settings) => ({
+    setTraceSettingsRaw((settings) => ({
       ...settings,
       numberofcolors: initialColorCount(count),
     }));
@@ -436,6 +461,111 @@ export function ImageTool() {
     setCanUndo(false);
     setCanRedo(false);
   }, []);
+
+  const traceSettingsRef = useRef(traceSettings);
+  const excludedRef = useRef(excludedColors);
+  useEffect(() => {
+    traceSettingsRef.current = traceSettings;
+  }, [traceSettings]);
+  useEffect(() => {
+    excludedRef.current = excludedColors;
+  }, [excludedColors]);
+
+  const snapshotSettings = useCallback(
+    (): SettingsSnapshot => ({
+      settings: { ...traceSettingsRef.current },
+      excluded: [...excludedRef.current].sort(),
+    }),
+    []
+  );
+
+  const flushSettingsHistory = useCallback(() => {
+    if (settingsTimerRef.current !== null) {
+      clearTimeout(settingsTimerRef.current);
+      settingsTimerRef.current = null;
+    }
+    const pending = pendingSettingsRef.current;
+    pendingSettingsRef.current = null;
+    setHasPendingSettings(false);
+    if (!pending) return;
+    const after = snapshotSettings();
+    if (JSON.stringify(pending.before) === JSON.stringify(after)) return;
+    const trimmed = settingsHistoryRef.current.slice(
+      0,
+      settingsIndexRef.current + 1
+    );
+    trimmed.push({ before: pending.before, after });
+    const limited = trimmed.slice(-MAX_HISTORY);
+    settingsHistoryRef.current = limited;
+    settingsIndexRef.current = limited.length - 1;
+    setCanUndoSettings(true);
+    setCanRedoSettings(false);
+  }, [snapshotSettings]);
+
+  const queueSettingsHistory = useCallback(() => {
+    if (!pendingSettingsRef.current) {
+      pendingSettingsRef.current = { before: snapshotSettings() };
+    }
+    setHasPendingSettings(true);
+    if (settingsTimerRef.current !== null) {
+      clearTimeout(settingsTimerRef.current);
+    }
+    settingsTimerRef.current = setTimeout(() => {
+      settingsTimerRef.current = null;
+      flushSettingsHistory();
+    }, SETTINGS_HISTORY_DELAY);
+  }, [flushSettingsHistory, snapshotSettings]);
+
+  const resetSettingsHistory = useCallback(() => {
+    if (settingsTimerRef.current !== null) {
+      clearTimeout(settingsTimerRef.current);
+      settingsTimerRef.current = null;
+    }
+    pendingSettingsRef.current = null;
+    settingsHistoryRef.current = [];
+    settingsIndexRef.current = -1;
+    setCanUndoSettings(false);
+    setCanRedoSettings(false);
+    setHasPendingSettings(false);
+  }, []);
+
+  useEffect(() => () => {
+    if (settingsTimerRef.current !== null) {
+      clearTimeout(settingsTimerRef.current);
+    }
+  }, []);
+
+  const updateTraceSettings = useCallback(
+    (action: SetStateAction<TraceSettings>) => {
+      queueSettingsHistory();
+      setTraceSettingsRaw(action);
+    },
+    [queueSettingsHistory]
+  );
+
+  const handleUndoSettings = useCallback(() => {
+    flushSettingsHistory();
+    const index = settingsIndexRef.current;
+    if (index < 0) return;
+    const edit = settingsHistoryRef.current[index];
+    settingsIndexRef.current = index - 1;
+    setTraceSettingsRaw(edit.before.settings);
+    setExcludedColors(new Set(edit.before.excluded));
+    setCanUndoSettings(index - 1 >= 0);
+    setCanRedoSettings(true);
+  }, [flushSettingsHistory]);
+
+  const handleRedoSettings = useCallback(() => {
+    flushSettingsHistory();
+    const next = settingsIndexRef.current + 1;
+    if (next >= settingsHistoryRef.current.length) return;
+    const edit = settingsHistoryRef.current[next];
+    settingsIndexRef.current = next;
+    setTraceSettingsRaw(edit.after.settings);
+    setExcludedColors(new Set(edit.after.excluded));
+    setCanUndoSettings(true);
+    setCanRedoSettings(next + 1 < settingsHistoryRef.current.length);
+  }, [flushSettingsHistory]);
 
   const applyBase = useCallback(
     (base: HTMLCanvasElement) => {
@@ -452,11 +582,12 @@ export function ImageTool() {
       setCropRect(null);
       void stepper.goTo("background");
       resetHistory();
+      resetSettingsHistory();
       syncDetectedColors(work);
       setStatus("ready");
       setVersion((value) => value + 1);
     },
-    [resetHistory, stepper, syncDetectedColors]
+    [resetHistory, resetSettingsHistory, stepper, syncDetectedColors]
   );
 
   const handleFile = useCallback(
@@ -832,26 +963,36 @@ export function ImageTool() {
     [allLayers, excludedColors]
   );
 
-  const toggleColor = useCallback((hex: string) => {
-    setExcludedColors((prev) => {
-      const next = new Set(prev);
-      if (next.has(hex)) {
-        next.delete(hex);
-      } else {
-        next.add(hex);
-      }
-      return next;
-    });
-  }, []);
+  const toggleColor = useCallback(
+    (hex: string) => {
+      queueSettingsHistory();
+      setExcludedColors((prev) => {
+        const next = new Set(prev);
+        if (next.has(hex)) {
+          next.delete(hex);
+        } else {
+          next.add(hex);
+        }
+        return next;
+      });
+    },
+    [queueSettingsHistory]
+  );
+
+  const includeAllColors = useCallback(() => {
+    queueSettingsHistory();
+    setExcludedColors(new Set());
+  }, [queueSettingsHistory]);
 
   const resetTraceSettings = useCallback(() => {
-    setTraceSettings((settings) => ({
+    updateTraceSettings((settings) => ({
       ...DEFAULT_TRACE_SETTINGS,
       mode: settings.mode,
       numberofcolors: initialColorCount(detectedColors),
     }));
+    queueSettingsHistory();
     setExcludedColors(new Set());
-  }, [detectedColors]);
+  }, [detectedColors, queueSettingsHistory, updateTraceSettings]);
 
   const activePreset = useMemo(() => {
     const entries = Object.entries(TRACE_PRESETS) as [
@@ -871,9 +1012,15 @@ export function ImageTool() {
   const usesColorPalette =
     traceSettings.mode !== "mono" && traceSettings.mode !== "mono-invert";
 
-  const applyPreset = useCallback((preset: TracePreset) => {
-    setTraceSettings((settings) => ({ ...settings, ...TRACE_PRESETS[preset] }));
-  }, []);
+  const applyPreset = useCallback(
+    (preset: TracePreset) => {
+      updateTraceSettings((settings) => ({
+        ...settings,
+        ...TRACE_PRESETS[preset],
+      }));
+    },
+    [updateTraceSettings]
+  );
 
   const maxColors = Math.max(
     2,
@@ -1024,30 +1171,7 @@ export function ImageTool() {
             </div>
 
             <div className="ml-auto flex items-center gap-1">
-              {tab === "background" ? (
-                <>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    onClick={handleUndo}
-                    disabled={!canUndo}
-                    aria-label="Deshacer"
-                    title="Deshacer"
-                  >
-                    <Undo2 className="size-4" />
-                  </Button>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    onClick={handleRedo}
-                    disabled={!canRedo}
-                    aria-label="Rehacer"
-                    title="Rehacer"
-                  >
-                    <Redo2 className="size-4" />
-                  </Button>
-                </>
-              ) : (
+              {tab !== "background" ? (
                 <span className="px-2 text-xs tabular-nums text-muted-foreground">
                   {tracing
                     ? "Vectorizando…"
@@ -1055,7 +1179,31 @@ export function ImageTool() {
                       ? `${visibleLayers.length}/${allLayers.length} colores`
                       : "Sin formas"}
                 </span>
-              )}
+              ) : null}
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={vectorMode ? handleUndoSettings : handleUndo}
+                disabled={
+                  vectorMode
+                    ? !(canUndoSettings || hasPendingSettings)
+                    : !canUndo
+                }
+                aria-label="Deshacer"
+                title="Deshacer"
+              >
+                <Undo2 className="size-4" />
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={vectorMode ? handleRedoSettings : handleRedo}
+                disabled={vectorMode ? !canRedoSettings : !canRedo}
+                aria-label="Rehacer"
+                title="Rehacer"
+              >
+                <Redo2 className="size-4" />
+              </Button>
             </div>
           </div>
 
@@ -1650,39 +1798,6 @@ export function ImageTool() {
                 </TabsList>
 
                 <TabsContent value="style" className="space-y-4">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                        <Sparkles className="size-3.5" />
-                        Estilo rápido
-                      </p>
-                      {activePreset ? (
-                        <span className="text-[11px] text-muted-foreground">
-                          {TRACE_PRESET_LABELS[activePreset]}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {(Object.keys(TRACE_PRESETS) as TracePreset[]).map(
-                        (preset) => (
-                          <Button
-                            key={preset}
-                            size="sm"
-                            variant={
-                              activePreset === preset ? "default" : "outline"
-                            }
-                            aria-pressed={activePreset === preset}
-                            onClick={() => applyPreset(preset)}
-                          >
-                            {TRACE_PRESET_LABELS[preset]}
-                          </Button>
-                        )
-                      )}
-                    </div>
-                  </div>
-
-                  <Separator />
-
                   <div className="space-y-3">
                     <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                       <Palette className="size-3.5" />
@@ -1693,7 +1808,7 @@ export function ImageTool() {
                       <Select
                         value={traceSettings.mode}
                         onValueChange={(value: string) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             mode: value as TraceSettings["mode"],
                           }))
@@ -1741,7 +1856,7 @@ export function ImageTool() {
                               Math.min(traceSettings.numberofcolors, maxColors),
                             ]}
                             onValueChange={(values: number[]) =>
-                              setTraceSettings((settings) => ({
+                              updateTraceSettings((settings) => ({
                                 ...settings,
                                 numberofcolors: values[0],
                               }))
@@ -1768,7 +1883,7 @@ export function ImageTool() {
                             variant="outline"
                             size="sm"
                             className="w-full"
-                            onClick={() => setExcludedColors(new Set())}
+                            onClick={includeAllColors}
                             disabled={excludedColors.size === 0}
                           >
                             <RotateCcw className="size-3.5" />
@@ -1785,6 +1900,41 @@ export function ImageTool() {
                     </div>
                   </div>
 
+                  <Separator />
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                        <Sparkles className="size-3.5" />
+                        Estilo rápido
+                      </p>
+                      {activePreset ? (
+                        <span className="text-[11px] text-muted-foreground">
+                          {TRACE_PRESET_LABELS[activePreset]}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(Object.keys(TRACE_PRESETS) as TracePreset[]).map(
+                        (preset) => (
+                          <Button
+                            key={preset}
+                            size="sm"
+                            variant={
+                              activePreset === preset ? "default" : "outline"
+                            }
+                            aria-pressed={activePreset === preset}
+                            onClick={() => applyPreset(preset)}
+                          >
+                            {TRACE_PRESET_LABELS[preset]}
+                          </Button>
+                        )
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Ajusta forma, bordes y detalle de una sola vez.
+                    </p>
+                  </div>
                 </TabsContent>
 
                 <TabsContent value="detail" className="space-y-4">
@@ -1807,7 +1957,7 @@ export function ImageTool() {
                         step={0.05}
                         value={[traceSettings.fidelity]}
                         onValueChange={(values: number[]) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             fidelity: Math.round(values[0] * 100) / 100,
                           }))
@@ -1832,7 +1982,7 @@ export function ImageTool() {
                         step={1}
                         value={[traceSettings.pathomit]}
                         onValueChange={(values: number[]) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             pathomit: values[0],
                           }))
@@ -1857,7 +2007,7 @@ export function ImageTool() {
                       <Select
                         value={String(traceSettings.roundcoords)}
                         onValueChange={(value: string) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             roundcoords: Number(value) as 0 | 1 | 2,
                           }))
@@ -1900,7 +2050,7 @@ export function ImageTool() {
                         step={1}
                         value={[traceSettings.blurradius]}
                         onValueChange={(values: number[]) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             blurradius: values[0],
                           }))
@@ -1925,7 +2075,7 @@ export function ImageTool() {
                         step={4}
                         value={[traceSettings.blurdelta]}
                         onValueChange={(values: number[]) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             blurdelta: values[0],
                           }))
@@ -1949,7 +2099,7 @@ export function ImageTool() {
                         }
                         aria-pressed={traceSettings.rightangleenhance}
                         onClick={() =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             rightangleenhance: !settings.rightangleenhance,
                           }))
@@ -1964,7 +2114,7 @@ export function ImageTool() {
                         }
                         aria-pressed={traceSettings.strokewidth > 0}
                         onClick={() =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             strokewidth: settings.strokewidth > 0 ? 0 : 1,
                           }))
@@ -1988,6 +2138,30 @@ export function ImageTool() {
                     </p>
 
                     <div className="space-y-1.5">
+                      <Button
+                        size="sm"
+                        variant={
+                          traceSettings.removeBackground ? "default" : "outline"
+                        }
+                        aria-pressed={traceSettings.removeBackground}
+                        className="w-full"
+                        onClick={() =>
+                          updateTraceSettings((settings) => ({
+                            ...settings,
+                            removeBackground: !settings.removeBackground,
+                          }))
+                        }
+                      >
+                        Descartar fondo por color
+                      </Button>
+                      <p className="text-[11px] text-muted-foreground">
+                        {traceSettings.removeBackground
+                          ? "El color del borde no se traza; los blancos internos se conservan."
+                          : "El fondo se traza como una forma más del SVG."}
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
                         <Label htmlFor="vector-alpha">Umbral de fondo</Label>
                         <span className="text-xs tabular-nums text-muted-foreground">
@@ -2001,7 +2175,7 @@ export function ImageTool() {
                         step={1}
                         value={[traceSettings.alphaThreshold]}
                         onValueChange={(values: number[]) =>
-                          setTraceSettings((settings) => ({
+                          updateTraceSettings((settings) => ({
                             ...settings,
                             alphaThreshold: values[0],
                           }))
@@ -2066,6 +2240,66 @@ export function ImageTool() {
                   </p>
                 </TabsContent>
               </Tabs>
+            </div>
+          ) : null}
+
+          {tab === "convert" ? (
+            <div
+              id="step-panel-convert"
+              role="region"
+              aria-labelledby="step-tab-convert"
+              className="mt-4 space-y-4"
+            >
+              <div className="space-y-1.5">
+                <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                  <Scissors className="size-3.5" />
+                  Continuar en otro módulo
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Lleva tu diseño a la herramienta que corresponda para
+                  terminar de prepararlo.
+                </p>
+              </div>
+
+              <div className="grid gap-2">
+                <Button
+                  asChild
+                  variant="outline"
+                  className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
+                >
+                  <Link href="/tools/posavasos">
+                    <Coffee className="size-5 shrink-0 text-primary" />
+                    <span className="flex flex-1 flex-col">
+                      <span className="text-sm font-medium">
+                        Convertir en posavasos
+                      </span>
+                      <span className="text-[11px] font-normal text-muted-foreground">
+                        Base circular con el diseño en relieve.
+                      </span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                  </Link>
+                </Button>
+
+                <Button
+                  asChild
+                  variant="outline"
+                  className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
+                >
+                  <Link href="/tools/llavero">
+                    <KeyRound className="size-5 shrink-0 text-primary" />
+                    <span className="flex flex-1 flex-col">
+                      <span className="text-sm font-medium">
+                        Convertir en llavero
+                      </span>
+                      <span className="text-[11px] font-normal text-muted-foreground">
+                        Pieza compacta con anilla de sujeción.
+                      </span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+                  </Link>
+                </Button>
+              </div>
             </div>
           ) : null}
         </div>
