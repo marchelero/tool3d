@@ -22,6 +22,7 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
 
 const BACKGROUND_SENTINEL = { r: 255, g: 0, b: 255 };
 const CONTENT_PADDING = 2;
+const MERGE_DISTANCE = 40;
 
 interface PaletteColor {
   r: number;
@@ -220,6 +221,55 @@ function isSentinel({ r, g, b }: PaletteColor): boolean {
   );
 }
 
+interface ColorCluster extends ColorBin {
+  sumR: number;
+  sumG: number;
+  sumB: number;
+}
+
+function clusterColorBins(bins: ColorBin[], maxDistance: number): ColorBin[] {
+  const limit = maxDistance * maxDistance;
+  const clusters: ColorCluster[] = [];
+
+  for (const bin of bins) {
+    let target: ColorCluster | undefined;
+    for (const cluster of clusters) {
+      const dr = cluster.r - bin.r;
+      const dg = cluster.g - bin.g;
+      const db = cluster.b - bin.b;
+      if (dr * dr + dg * dg + db * db <= limit) {
+        target = cluster;
+        break;
+      }
+    }
+
+    if (!target) {
+      clusters.push({
+        count: bin.count,
+        r: bin.r,
+        g: bin.g,
+        b: bin.b,
+        sumR: bin.r * bin.count,
+        sumG: bin.g * bin.count,
+        sumB: bin.b * bin.count,
+      });
+      continue;
+    }
+
+    target.count += bin.count;
+    target.sumR += bin.r * bin.count;
+    target.sumG += bin.g * bin.count;
+    target.sumB += bin.b * bin.count;
+    target.r = Math.round(target.sumR / target.count);
+    target.g = Math.round(target.sumG / target.count);
+    target.b = Math.round(target.sumB / target.count);
+  }
+
+  return clusters
+    .sort((a, b) => b.count - a.count)
+    .map(({ r, g, b, count }) => ({ r, g, b, count }));
+}
+
 export function estimateColorCount(
   imgData: ImageData,
   alphaThreshold: number
@@ -237,9 +287,10 @@ export function buildColorPalette(
 ): PaletteColor[] {
   const capped = Math.max(1, Math.min(64, count));
   const { bins } = collectColorBins(imgData, alphaThreshold);
+  const merged = clusterColorBins(bins, MERGE_DISTANCE);
   const colors: PaletteColor[] = [];
 
-  for (const bin of bins) {
+  for (const bin of merged) {
     if (isSentinel(bin)) continue;
     colors.push({ r: bin.r, g: bin.g, b: bin.b });
     if (colors.length >= capped) break;
@@ -254,13 +305,6 @@ export function tracePreparedImage(
 ): string {
   const svg = ImageTracer.imagedataToSVG(prepared, buildOptions(settings, prepared));
   return stripBackgroundPaths(svg);
-}
-
-export function traceImageDataToSvg(
-  imgData: ImageData,
-  settings: TraceSettings
-): string {
-  return tracePreparedImage(prepareTraceImageData(imgData, settings), settings);
 }
 
 export interface ColorLayer {
