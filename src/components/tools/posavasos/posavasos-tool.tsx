@@ -23,6 +23,7 @@ import {
   Eye,
   EyeOff,
   FileUp,
+  Grid3x3,
   Hexagon,
   Image as ImageIcon,
   Layers,
@@ -55,6 +56,11 @@ import {
   type DesignMode,
 } from "@/lib/3d/coaster";
 import { piecesToMeshes, export3mf, exportStl, type MeshPiece } from "@/lib/3d/mesh";
+import {
+  TILE_KINDS,
+  TILE_LABELS,
+  mosaicPreviewUrl,
+} from "@/lib/3d/mosaic";
 import {
   clearPosavasosHandoff,
   handoffSnapshot,
@@ -102,6 +108,7 @@ const DESIGN_KINDS: { value: DesignKind; label: string; icon: LucideIcon }[] = [
   { value: "none", label: "Sin diseño", icon: Ban },
   { value: "image", label: "Imagen", icon: ImageIcon },
   { value: "pattern", label: "Patrón", icon: LayoutGrid },
+  { value: "mosaic", label: "Mosaico", icon: Grid3x3 },
 ];
 
 const DESIGN_MODES: { value: DesignMode; label: string }[] = [
@@ -201,7 +208,8 @@ export function PosavasoTool() {
   );
 
   const layers = useMemo(
-    () => (designKind === "image" ? availableLayers : []),
+    () =>
+      designKind === "image" || designKind === "mosaic" ? availableLayers : [],
     [availableLayers, designKind]
   );
 
@@ -271,7 +279,11 @@ export function PosavasoTool() {
       setHandoffDismissed(true);
       setSvgLayers(parsed);
       setSvgName(baseName(file.name));
-      setSettings((current) => ({ ...current, designKind: "image" }));
+      setSettings((current) =>
+        current.designKind === "none"
+          ? { ...current, designKind: "image" }
+          : current
+      );
       toast.success(`SVG cargado con ${parsed.length} color(es)`);
     } catch (error) {
       console.error(error);
@@ -317,7 +329,20 @@ export function PosavasoTool() {
     []
   );
 
+  const tilePreviews = useMemo(
+    () =>
+      TILE_KINDS.map((kind) => ({
+        kind,
+        label: TILE_LABELS[kind],
+        url: mosaicPreviewUrl(kind),
+      })),
+    []
+  );
+
   const usingHandoff = !svgLayers && availableLayers.length > 0 && !handoffDismissed;
+  const showsImage = designKind === "image" || designKind === "mosaic";
+  const showsPattern = designKind === "pattern";
+  const showsMosaic = designKind === "mosaic";
 
   return (
     <div
@@ -544,11 +569,13 @@ export function PosavasoTool() {
                 icon={Palette}
                 title="Diseño"
                 summary={
-                  designKind === "image" && availableLayers.length > 0
-                    ? `${availableLayers.length} color(es)`
-                    : designKind === "pattern"
-                      ? PATTERN_LABELS[settings.pattern]
-                      : "en blanco"
+                  designKind === "mosaic"
+                    ? `${TILE_LABELS[settings.mosaicKind]} ×${settings.mosaicTileMm} mm`
+                    : designKind === "image" && availableLayers.length > 0
+                      ? `${availableLayers.length} color(es)`
+                      : designKind === "pattern"
+                        ? PATTERN_LABELS[settings.pattern]
+                        : "en blanco"
                 }
                 open={openPanels.design}
                 onToggle={togglePanel}
@@ -576,7 +603,7 @@ export function PosavasoTool() {
               })}
             </div>
 
-            {designKind === "image" ? (
+            {showsImage ? (
               <div className="space-y-2">
                 <input
                   ref={fileInputRef}
@@ -599,22 +626,37 @@ export function PosavasoTool() {
                   {availableLayers.length > 0 ? "Cambiar SVG" : "Cargar SVG"}
                 </Button>
                 {availableLayers.length > 0 ? (
-                  <p className="text-[11px] text-muted-foreground">
-                    {usingHandoff
-                      ? `Enviado desde Imagen: ${availableLayers.length} color(es) de ${sourceName}.`
-                      : `${availableLayers.length} color(es) desde ${sourceName}.`}
-                  </p>
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] text-muted-foreground">
+                      {designKind === "mosaic"
+                        ? `${availableLayers.length} color(es) para el mosaico.`
+                        : usingHandoff
+                          ? `Enviado desde Imagen: ${availableLayers.length} color(es) de ${sourceName}.`
+                          : `${availableLayers.length} color(es) desde ${sourceName}.`}
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {availableLayers.map((layer) => (
+                        <span
+                          key={layer.color}
+                          className="size-4 rounded-sm border"
+                          style={{ backgroundColor: layer.color }}
+                          title={layer.color}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 ) : (
                   <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
                     <Coffee className="mt-0.5 size-3 shrink-0" />
-                    Cargá un SVG con colores o vectorizá una imagen y usá
-                    &quot;Convertir en posavasos&quot;.
+                    {designKind === "mosaic"
+                      ? "Cargá un SVG para repetirlo en mosaico sobre todo el posavasos."
+                      : "Cargá un SVG con colores o vectorizá una imagen y usá \"Convertir en posavasos\"."}
                   </p>
                 )}
               </div>
             ) : null}
 
-            {designKind === "pattern" ? (
+            {showsPattern ? (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -713,7 +755,7 @@ export function PosavasoTool() {
               </div>
             ) : null}
 
-            {designKind !== "none" ? (
+            {showsPattern || designKind === "image" ? (
               <div className="space-y-1.5">
                 <Label className="text-xs">Modo</Label>
                 <div className="grid grid-cols-3 gap-1.5">
@@ -742,8 +784,7 @@ export function PosavasoTool() {
                       ? "El diseño atraviesa todas las capas y deja huecos pasantes."
                       : "El diseño queda hundido, al ras del color."}
                 </p>
-                {designKind === "pattern" &&
-                settings.designMode !== "through" ? (
+                {showsPattern && settings.designMode !== "through" ? (
                   <Button
                     size="sm"
                     variant={settings.designInvert ? "default" : "outline"}
@@ -756,7 +797,7 @@ export function PosavasoTool() {
                     Invertir
                   </Button>
                 ) : null}
-                {settings.designInvert && designKind === "pattern" ? (
+                {settings.designInvert && showsPattern ? (
                   <p className="text-[11px] text-muted-foreground">
                     Ahora la red entre las celdas es la que sobresale (o se
                     rebaja) y las celdas quedan como huecos.
@@ -765,8 +806,9 @@ export function PosavasoTool() {
               </div>
             ) : null}
               </Panel>
-
-              {settings.designMode === "through" || designKind === "none" ? null : (
+              {settings.designMode === "through" ||
+              designKind === "none" ||
+              showsMosaic ? null : (
                 <Panel
                   id="placement"
                   icon={Box}
@@ -817,7 +859,216 @@ export function PosavasoTool() {
                 </Panel>
               )}
 
-              {designKind === "none" ? null : (
+              {showsMosaic ? (
+                <Panel
+                  id="mosaic"
+                  icon={LayoutGrid}
+                  title="Mosaico"
+                  summary={`${TILE_LABELS[settings.mosaicKind]} · ${settings.mosaicTileMm} mm · ${
+                    DESIGN_MODES.find(
+                      (mode) => mode.value === settings.mosaicMode
+                    )?.label ?? ""
+                  }`}
+                  open={openPanels.mosaic}
+                  onToggle={togglePanel}
+                >
+                  {availableLayers.length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Cargá un SVG para armar el mosaico.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">Tipo de mosaico</Label>
+                          <span className="text-[11px] text-muted-foreground">
+                            {TILE_LABELS[settings.mosaicKind]}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {tilePreviews.map((preview) => {
+                            const active =
+                              settings.mosaicKind === preview.kind;
+                            return (
+                              <button
+                                key={preview.kind}
+                                type="button"
+                                title={preview.label}
+                                aria-label={preview.label}
+                                aria-pressed={active}
+                                onClick={() =>
+                                  updateSettings({
+                                    mosaicKind: preview.kind,
+                                  })
+                                }
+                                className={
+                                  active
+                                    ? "flex flex-col items-center gap-1 rounded-md border border-primary bg-primary/10 p-1.5"
+                                    : "flex flex-col items-center gap-1 rounded-md border bg-card p-1.5 transition-colors hover:border-primary/50"
+                                }
+                              >
+                                <Image
+                                  src={preview.url}
+                                  alt={preview.label}
+                                  width={32}
+                                  height={32}
+                                  unoptimized
+                                  className="size-8 rounded-sm bg-white/70"
+                                />
+                                <span className="text-[10px] leading-none">
+                                  {preview.label}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">Tamaño de la pieza</Label>
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            {settings.mosaicTileMm} mm
+                          </span>
+                        </div>
+                        <Slider
+                          min={4}
+                          max={40}
+                          step={1}
+                          value={[settings.mosaicTileMm]}
+                          onValueChange={([value]) =>
+                            updateSettings({ mosaicTileMm: value })
+                          }
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">Separación</Label>
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            {settings.mosaicGapMm} mm
+                          </span>
+                        </div>
+                        <Slider
+                          min={0}
+                          max={8}
+                          step={0.5}
+                          value={[settings.mosaicGapMm]}
+                          onValueChange={([value]) =>
+                            updateSettings({ mosaicGapMm: value })
+                          }
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">Rotación del mosaico</Label>
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            {settings.mosaicRotation}°
+                          </span>
+                        </div>
+                        <Slider
+                          min={0}
+                          max={345}
+                          step={15}
+                          value={[settings.mosaicRotation]}
+                          onValueChange={([value]) =>
+                            updateSettings({ mosaicRotation: value })
+                          }
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                          Gira el mosaico completo sobre el centro del
+                          posavasos.
+                        </p>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Modo del mosaico</Label>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {DESIGN_MODES.map((mode) => (
+                            <Button
+                              key={mode.value}
+                              size="sm"
+                              variant={
+                                settings.mosaicMode === mode.value
+                                  ? "default"
+                                  : "outline"
+                              }
+                              aria-pressed={settings.mosaicMode === mode.value}
+                              onClick={() =>
+                                updateSettings({ mosaicMode: mode.value })
+                              }
+                            >
+                              {mode.label}
+                            </Button>
+                          ))}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {settings.mosaicMode === "raise"
+                            ? "El mosaico sobresale por encima de la superficie."
+                            : settings.mosaicMode === "through"
+                              ? "El mosaico atraviesa todas las capas y deja huecos pasantes."
+                              : "El mosaico queda hundido, al ras del color."}
+                        </p>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Ubicación del mosaico</Label>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {PLACEMENTS.map((placement) => (
+                            <Button
+                              key={placement.value}
+                              size="sm"
+                              variant={
+                                settings.mosaicPlacement === placement.value
+                                  ? "default"
+                                  : "outline"
+                              }
+                              aria-pressed={
+                                settings.mosaicPlacement === placement.value
+                              }
+                              className="px-1 text-[11px]"
+                              onClick={() =>
+                                updateSettings({
+                                  mosaicPlacement: placement.value,
+                                })
+                              }
+                            >
+                              {placement.label}
+                            </Button>
+                          ))}
+                        </div>
+                        {settings.mosaicPlacement !== "full" ? (
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <Label className="text-xs">
+                                Capas del mosaico
+                              </Label>
+                              <span className="text-[11px] tabular-nums text-muted-foreground">
+                                {Math.min(
+                                  settings.mosaicLayers,
+                                  settings.layers
+                                )}
+                              </span>
+                            </div>
+                            <Slider
+                              min={1}
+                              max={Math.max(1, settings.layers - 1)}
+                              step={1}
+                              value={[settings.mosaicLayers]}
+                              onValueChange={([value]) =>
+                                updateSettings({ mosaicLayers: value })
+                              }
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
+                </Panel>
+              ) : null}
+
+              {designKind === "none" || designKind === "mosaic" ? null : (
                 <Panel
                   id="scale"
                   icon={Scaling}
@@ -1130,6 +1381,7 @@ const PANEL_IDS = [
   "design",
   "placement",
   "scale",
+  "mosaic",
 ] as const;
 
 function Panel({

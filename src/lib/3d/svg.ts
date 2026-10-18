@@ -27,6 +27,8 @@ const EMPTY_BOUNDS: DesignBounds = {
 const CURVE_DIVISIONS = 12;
 const POINT_EPSILON = 1e-3;
 const COLLINEAR_RATIO = 1e-3;
+const MAX_PATHS = 600;
+const MAX_POLYGONS = 1200;
 
 function signedArea(points: Vec2[]): number {
   let sum = 0;
@@ -121,10 +123,11 @@ export function svgToDesign(svgText: string): DesignGeometry {
   const polygons: Geom2[] = [];
   const bounds: DesignBounds = { ...EMPTY_BOUNDS };
 
-  for (const path of data.paths) {
+  for (const path of data.paths.slice(0, MAX_PATHS)) {
     const style = path.userData?.style as { display?: string } | undefined;
     if (style?.display === "none") continue;
     for (const shape of path.toShapes()) {
+      if (polygons.length >= MAX_POLYGONS) break;
       let converted: { geometry: Geom2 | null; points: Vec2[] };
       try {
         converted = shapeToGeom2(shape);
