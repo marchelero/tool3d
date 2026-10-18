@@ -1,10 +1,12 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Boxes,
+  Coffee,
   Image as ImageIcon,
   KeyRound,
   Ruler,
   Shapes,
+  Type,
 } from "lucide-react";
 
 export type ToolCategory = "imagen" | "3d" | "utilidades";
@@ -47,14 +49,34 @@ export const TOOLS: ToolDefinition[] = [
     ],
   },
   {
+    slug: "llavero",
+    name: "Llavero con imagen",
+    description:
+      "Convierte tus diseños vectorizados en llaveros listos para imprimir en 3D.",
+    category: "3d",
+    status: "available",
+    icon: KeyRound,
+    tags: ["llavero", "anilla", "relieve", "svg"],
+  },
+  {
     slug: "keychain",
     name: "Llaveros con nombres",
     description:
       "Genera llaveros personalizados con nombres y letras, listos para imprimir en 3D.",
     category: "3d",
     status: "soon",
-    icon: KeyRound,
+    icon: Type,
     tags: ["llavero", "nombre", "letras", "texto"],
+  },
+  {
+    slug: "posavasos",
+    name: "Posavasos",
+    description:
+      "Convierte tus diseños vectorizados en posavasos con relieve listos para imprimir en 3D.",
+    category: "3d",
+    status: "available",
+    icon: Coffee,
+    tags: ["posavasos", "relieve", "circular", "svg"],
   },
   {
     slug: "generate-3d",

@@ -59,8 +59,9 @@ export default function HomePage() {
           Todo lo que necesitas antes de imprimir
         </h1>
         <p className="mt-4 text-pretty text-muted-foreground">
-          Prepara imágenes, quita fondos, vectoriza y separa por colores. Un pack
-          modular que seguirá creciendo con nuevas herramientas 3D.
+          Prepara imágenes, quita fondos, vectoriza y separa por colores, y
+          convierte tus diseños en llaveros o posavasos. Un pack modular que
+          seguirá creciendo con nuevas herramientas 3D.
         </p>
       </section>
 
