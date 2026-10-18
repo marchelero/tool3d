@@ -102,10 +102,11 @@ const MAX_HISTORY = 30;
 const TRACE_DEBOUNCE_MS = 400;
 const MAX_COLORS = 32;
 const DEFAULT_COLORS = 8;
+const INITIAL_COLORS = 4;
 
-function clampColorCount(count: number): number {
-  if (count <= 0) return DEFAULT_COLORS;
-  return Math.max(2, Math.min(MAX_COLORS, count));
+function initialColorCount(detected: number): number {
+  if (detected <= 0) return DEFAULT_COLORS;
+  return Math.max(2, Math.min(INITIAL_COLORS, MAX_COLORS, detected));
 }
 
 function countColors(canvas: HTMLCanvasElement): number {
@@ -341,7 +342,7 @@ export function ImageTool() {
     setDetectedColors(count);
     setTraceSettings((settings) => ({
       ...settings,
-      numberofcolors: clampColorCount(count),
+      numberofcolors: initialColorCount(count),
     }));
   }, []);
 
@@ -1202,8 +1203,8 @@ export function ImageTool() {
                       <p className="text-[11px] text-muted-foreground">
                         {detectedColors > 0
                           ? detectedColors > MAX_COLORS
-                            ? `La imagen tiene más de ${MAX_COLORS} colores distintos.`
-                            : `Se detectaron ~${detectedColors} colores distintos.`
+                            ? `La imagen tiene más de ${MAX_COLORS} colores distintos (tope del control).`
+                            : `Se detectaron ~${detectedColors} colores distintos (tope del control).`
                           : "Cuántos colores distintos tendrá el SVG."}{" "}
                         Más colores = más detalle y más peso.
                       </p>

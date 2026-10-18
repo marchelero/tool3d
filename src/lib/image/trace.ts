@@ -23,12 +23,24 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
 const BACKGROUND_SENTINEL = { r: 255, g: 0, b: 255 };
 const CONTENT_PADDING = 2;
 
-function buildOptions(settings: TraceSettings): TraceOptions {
+interface PaletteColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+function buildOptions(
+  settings: TraceSettings,
+  prepared: ImageData
+): TraceOptions {
+  const alphaThreshold = Math.max(0, Math.min(255, settings.alphaThreshold));
   const base: TraceOptions = {
     pathomit: settings.pathomit,
     ltres: settings.ltres,
     qtres: settings.qtres,
     blurradius: settings.blurradius,
+    colorquantcycles: 1,
+    mincolorratio: 0,
     rightangleenhance: true,
     roundcoords: 1,
     viewbox: false,
@@ -48,10 +60,19 @@ function buildOptions(settings: TraceSettings): TraceOptions {
     };
   }
 
+  const colors = buildColorPalette(
+    prepared,
+    alphaThreshold,
+    settings.numberofcolors
+  );
+
   return {
     ...base,
-    colorsampling: 2,
-    numberofcolors: Math.min(64, settings.numberofcolors + 1),
+    colorsampling: 0,
+    pal: [
+      { ...BACKGROUND_SENTINEL, a: 255 },
+      ...colors.map((color) => ({ ...color, a: 255 })),
+    ],
   };
 }
 
@@ -149,12 +170,19 @@ export function prepareTraceImageData(
   return out;
 }
 
-export function estimateColorCount(
+interface ColorBin extends PaletteColor {
+  count: number;
+}
+
+function collectColorBins(
   imgData: ImageData,
   alphaThreshold: number
-): number {
+): { bins: ColorBin[]; total: number } {
   const { data } = imgData;
-  const bins = new Int32Array(4096);
+  const counts = new Int32Array(4096);
+  const sumR = new Float64Array(4096);
+  const sumG = new Float64Array(4096);
+  const sumB = new Float64Array(4096);
   let total = 0;
 
   for (let i = 0; i < data.length; i += 4) {
@@ -162,24 +190,69 @@ export function estimateColorCount(
     total += 1;
     const key =
       ((data[i] >> 4) << 8) | ((data[i + 1] >> 4) << 4) | (data[i + 2] >> 4);
-    bins[key] += 1;
+    counts[key] += 1;
+    sumR[key] += data[i];
+    sumG[key] += data[i + 1];
+    sumB[key] += data[i + 2];
   }
 
+  const bins: ColorBin[] = [];
+  for (let key = 0; key < counts.length; key += 1) {
+    const count = counts[key];
+    if (count === 0) continue;
+    bins.push({
+      count,
+      r: Math.round(sumR[key] / count),
+      g: Math.round(sumG[key] / count),
+      b: Math.round(sumB[key] / count),
+    });
+  }
+  bins.sort((a, b) => b.count - a.count);
+
+  return { bins, total };
+}
+
+function isSentinel({ r, g, b }: PaletteColor): boolean {
+  return (
+    r === BACKGROUND_SENTINEL.r &&
+    g === BACKGROUND_SENTINEL.g &&
+    b === BACKGROUND_SENTINEL.b
+  );
+}
+
+export function estimateColorCount(
+  imgData: ImageData,
+  alphaThreshold: number
+): number {
+  const { bins, total } = collectColorBins(imgData, alphaThreshold);
   if (total === 0) return 0;
-
   const minPixels = Math.max(1, Math.floor(total * 0.005));
-  let count = 0;
-  for (let i = 0; i < bins.length; i += 1) {
-    if (bins[i] >= minPixels) count += 1;
+  return bins.reduce((count, bin) => (bin.count >= minPixels ? count + 1 : count), 0);
+}
+
+export function buildColorPalette(
+  imgData: ImageData,
+  alphaThreshold: number,
+  count: number
+): PaletteColor[] {
+  const capped = Math.max(1, Math.min(64, count));
+  const { bins } = collectColorBins(imgData, alphaThreshold);
+  const colors: PaletteColor[] = [];
+
+  for (const bin of bins) {
+    if (isSentinel(bin)) continue;
+    colors.push({ r: bin.r, g: bin.g, b: bin.b });
+    if (colors.length >= capped) break;
   }
-  return count;
+
+  return colors;
 }
 
 export function tracePreparedImage(
   prepared: ImageData,
   settings: TraceSettings
 ): string {
-  const svg = ImageTracer.imagedataToSVG(prepared, buildOptions(settings));
+  const svg = ImageTracer.imagedataToSVG(prepared, buildOptions(settings, prepared));
   return stripBackgroundPaths(svg);
 }
 
