@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { extractRegion } from "@/lib/image/canvas";
 import { floodFillByColor } from "@/lib/image/flood-fill";
-import type { BrushSettings, HistoryEntry } from "./types";
+import type { BrushSettings, HistoryEntry, Rect } from "./types";
 import { ZoomViewport } from "./zoom-viewport";
 
 type EditorTool = "brush" | "wand";
@@ -17,6 +17,9 @@ interface EditorCanvasProps {
   tolerance: number;
   enabled: boolean;
   version: number;
+  cropActive?: boolean;
+  cropRect?: Rect | null;
+  onCropRectChange?: (rect: Rect | null) => void;
   onStroke: (entry: HistoryEntry) => void;
 }
 
@@ -40,6 +43,9 @@ export function EditorCanvas({
   tolerance,
   enabled,
   version,
+  cropActive = false,
+  cropRect = null,
+  onCropRectChange,
   onStroke,
 }: EditorCanvasProps) {
   const displayRef = useRef<HTMLCanvasElement>(null);
@@ -48,6 +54,7 @@ export function EditorCanvas({
   const lastRef = useRef<Point | null>(null);
   const strokeStartRef = useRef<ImageData | null>(null);
   const boundsRef = useRef<Bounds | null>(null);
+  const cropStartRef = useRef<Point | null>(null);
 
   const render = useCallback(() => {
     const display = displayRef.current;
@@ -57,11 +64,11 @@ export function EditorCanvas({
 
     ctx.clearRect(0, 0, display.width, display.height);
     ctx.drawImage(workCanvas, 0, 0);
+    const lineWidth = Math.max(1, display.width / 600);
 
     const hover = hoverRef.current;
-    if (hover && enabled && tool === "brush") {
+    if (hover && enabled && !cropActive && tool === "brush") {
       const radius = Math.max(1, brush.size / 2);
-      const lineWidth = Math.max(1, display.width / 600);
       ctx.save();
       ctx.beginPath();
       ctx.arc(hover.x, hover.y, radius, 0, Math.PI * 2);
@@ -75,7 +82,27 @@ export function EditorCanvas({
       ctx.stroke();
       ctx.restore();
     }
-  }, [workCanvas, enabled, tool, brush.size]);
+
+    if (cropActive && cropRect && cropRect.w > 0.5 && cropRect.h > 0.5) {
+      const rx = Math.max(0, cropRect.x);
+      const ry = Math.max(0, cropRect.y);
+      const rw = Math.min(display.width - rx, cropRect.w);
+      const rh = Math.min(display.height - ry, cropRect.h);
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(0, 0, display.width, ry);
+      ctx.fillRect(0, ry + rh, display.width, display.height - (ry + rh));
+      ctx.fillRect(0, ry, rx, rh);
+      ctx.fillRect(rx + rw, ry, display.width - (rx + rw), rh);
+      ctx.lineWidth = lineWidth * 2;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = "rgba(255,255,255,0.95)";
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.restore();
+    }
+  }, [workCanvas, enabled, tool, brush.size, cropActive, cropRect]);
 
   useEffect(() => {
     const display = displayRef.current;
@@ -191,8 +218,18 @@ export function EditorCanvas({
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!enabled || !workCanvas) return;
+    if (!workCanvas) return;
     event.preventDefault();
+
+    if (cropActive) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      const point = getPoint(event);
+      cropStartRef.current = point;
+      onCropRectChange?.({ x: point.x, y: point.y, w: 0, h: 0 });
+      return;
+    }
+
+    if (!enabled) return;
 
     if (tool === "wand") {
       applyWand(getPoint(event));
@@ -225,6 +262,24 @@ export function EditorCanvas({
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const point = getPoint(event);
+
+    if (cropActive) {
+      if (!cropStartRef.current) return;
+      const start = cropStartRef.current;
+      const maxX = workCanvas?.width ?? 0;
+      const maxY = workCanvas?.height ?? 0;
+      const clampedX = Math.max(0, Math.min(maxX, point.x));
+      const clampedY = Math.max(0, Math.min(maxY, point.y));
+      onCropRectChange?.({
+        x: Math.min(start.x, clampedX),
+        y: Math.min(start.y, clampedY),
+        w: Math.abs(clampedX - start.x),
+        h: Math.abs(clampedY - start.y),
+      });
+      render();
+      return;
+    }
+
     hoverRef.current = point;
     if (tool === "brush" && drawingRef.current && lastRef.current) {
       paintLine(lastRef.current, point);
@@ -259,12 +314,16 @@ export function EditorCanvas({
   };
 
   const handlePointerUp = () => {
+    if (cropActive) {
+      cropStartRef.current = null;
+      return;
+    }
     finishStroke();
   };
 
   const handlePointerLeave = () => {
     hoverRef.current = null;
-    if (tool === "brush") {
+    if (tool === "brush" && !cropActive) {
       render();
     }
   };
@@ -276,7 +335,7 @@ export function EditorCanvas({
       contentWidth={workCanvas.width}
       contentHeight={workCanvas.height}
       resetKey={workCanvas}
-      enableKeyboard={enabled}
+      enableKeyboard={enabled && !cropActive}
       background="checker"
     >
       <canvas
@@ -287,7 +346,13 @@ export function EditorCanvas({
         onPointerCancel={handlePointerUp}
         onPointerLeave={handlePointerLeave}
         className="block h-full w-full touch-none select-none"
-        style={{ cursor: enabled ? "crosshair" : "default" }}
+        style={{
+          cursor: cropActive
+            ? "crosshair"
+            : enabled
+              ? "crosshair"
+              : "default",
+        }}
       />
     </ZoomViewport>
   );

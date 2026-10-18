@@ -13,3 +13,10 @@ export interface HistoryEntry {
   before: ImageData;
   after: ImageData;
 }
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}

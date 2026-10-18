@@ -3,14 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  Crop,
   Download,
   Eraser,
+  FlipHorizontal2,
+  FlipVertical2,
   ImagePlus,
   Loader2,
   Paintbrush,
   Palette,
   Redo2,
   RotateCcw,
+  RotateCw,
   Scissors,
   Sparkles,
   Undo2,
@@ -48,6 +52,7 @@ import {
   imageFileToCanvas,
 } from "@/lib/image/canvas";
 import { removeBackgroundClient } from "@/lib/image/background";
+import { canvasToBmp, canvasToIco } from "@/lib/image/export";
 import {
   DEFAULT_TRACE_SETTINGS,
   estimateColorCount,
@@ -69,10 +74,11 @@ import {
 import { Dropzone } from "./dropzone";
 import { EditorCanvas } from "./editor-canvas";
 import { SvgPreview } from "./svg-preview";
-import type { BrushSettings, HistoryEntry } from "./types";
+import type { BrushSettings, HistoryEntry, Rect } from "./types";
 
 type Status = "empty" | "ready" | "removing";
 type TabValue = "background" | "vector";
+type ExportFormat = "png" | "jpeg" | "webp" | "bmp" | "ico";
 
 interface ProgressState {
   label: string;
@@ -138,6 +144,36 @@ function computeTrace(
   const svg = tracePreparedImage(prepared, settings);
   if (!/<path\b/.test(svg)) return null;
   return { svg, width: prepared.width, height: prepared.height };
+}
+
+type TransformKind = "rotL" | "rotR" | "flipH" | "flipV";
+
+function transformCanvas(
+  src: HTMLCanvasElement,
+  kind: TransformKind
+): HTMLCanvasElement {
+  const swap = kind === "rotL" || kind === "rotR";
+  const out = createCanvas(swap ? src.height : src.width, swap ? src.width : src.height);
+  const ctx = get2d(out, true);
+  const w = src.width;
+  const h = src.height;
+  ctx.save();
+  if (kind === "rotR") {
+    ctx.translate(h, 0);
+    ctx.rotate(Math.PI / 2);
+  } else if (kind === "rotL") {
+    ctx.translate(0, w);
+    ctx.rotate(-Math.PI / 2);
+  } else if (kind === "flipH") {
+    ctx.translate(w, 0);
+    ctx.scale(-1, 1);
+  } else {
+    ctx.translate(0, h);
+    ctx.scale(1, -1);
+  }
+  ctx.drawImage(src, 0, 0);
+  ctx.restore();
+  return out;
 }
 
 function ColorPalette({
@@ -291,9 +327,14 @@ export function ImageTool() {
     result: TraceResult | null;
   } | null>(null);
   const [detectedColors, setDetectedColors] = useState(DEFAULT_COLORS);
+  const [cropActive, setCropActive] = useState(false);
+  const [cropRect, setCropRect] = useState<Rect | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("png");
+  const [exportQuality, setExportQuality] = useState(92);
 
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
+  const pristineRef = useRef<HTMLCanvasElement | null>(null);
 
   const syncDetectedColors = useCallback((canvas: HTMLCanvasElement) => {
     const count = countColors(canvas);
@@ -321,11 +362,14 @@ export function ImageTool() {
         const source = await imageFileToCanvas(file);
         const work = createCanvas(source.width, source.height);
         get2d(work, true).drawImage(source, 0, 0);
+        pristineRef.current = source;
         setOriginalCanvas(source);
         setWorkCanvas(work);
         setFileName(file.name);
         setExcludedColors(new Set());
         setTraceState(null);
+        setCropActive(false);
+        setCropRect(null);
         setTab("background");
         resetHistory();
         syncDetectedColors(work);
@@ -371,16 +415,65 @@ export function ImageTool() {
   }, [originalCanvas, resetHistory, syncDetectedColors]);
 
   const handleResetEdits = useCallback(() => {
-    if (!originalCanvas) return;
-    const work = createCanvas(originalCanvas.width, originalCanvas.height);
-    get2d(work, true).drawImage(originalCanvas, 0, 0);
+    const pristine = pristineRef.current;
+    if (!pristine) return;
+    const work = createCanvas(pristine.width, pristine.height);
+    get2d(work, true).drawImage(pristine, 0, 0);
+    const base = createCanvas(pristine.width, pristine.height);
+    get2d(base, true).drawImage(pristine, 0, 0);
+    setOriginalCanvas(base);
     setWorkCanvas(work);
     setExcludedColors(new Set());
     setTraceState(null);
+    setCropActive(false);
+    setCropRect(null);
     resetHistory();
     syncDetectedColors(work);
     setVersion((value) => value + 1);
-  }, [originalCanvas, resetHistory, syncDetectedColors]);
+  }, [resetHistory, syncDetectedColors]);
+
+  const applyTransform = useCallback(
+    (kind: TransformKind) => {
+      if (!workCanvas || !originalCanvas) return;
+      setWorkCanvas(transformCanvas(workCanvas, kind));
+      setOriginalCanvas(transformCanvas(originalCanvas, kind));
+      setCropActive(false);
+      setCropRect(null);
+      resetHistory();
+      setTraceState(null);
+      setVersion((value) => value + 1);
+    },
+    [workCanvas, originalCanvas, resetHistory]
+  );
+
+  const applyCrop = useCallback(() => {
+    if (!workCanvas || !originalCanvas || !cropRect) return;
+    const x = Math.max(0, Math.round(cropRect.x));
+    const y = Math.max(0, Math.round(cropRect.y));
+    const w = Math.min(workCanvas.width - x, Math.round(cropRect.w));
+    const h = Math.min(workCanvas.height - y, Math.round(cropRect.h));
+    if (w < 2 || h < 2) {
+      toast.error("Selecciona un área válida para recortar");
+      return;
+    }
+    const crop = (src: HTMLCanvasElement) => {
+      const out = createCanvas(w, h);
+      get2d(out, true).drawImage(src, -x, -y);
+      return out;
+    };
+    setWorkCanvas(crop(workCanvas));
+    setOriginalCanvas(crop(originalCanvas));
+    setCropActive(false);
+    setCropRect(null);
+    resetHistory();
+    setTraceState(null);
+    setVersion((value) => value + 1);
+  }, [workCanvas, originalCanvas, cropRect, resetHistory]);
+
+  const cancelCrop = useCallback(() => {
+    setCropActive(false);
+    setCropRect(null);
+  }, []);
 
   const handleStroke = useCallback((entry: HistoryEntry) => {
     const trimmed = historyRef.current.slice(0, historyIndexRef.current + 1);
@@ -433,6 +526,44 @@ export function ImageTool() {
     }
   }, [workCanvas, fileName]);
 
+  const handleExportImage = useCallback(async () => {
+    if (!workCanvas) return;
+    try {
+      let blob: Blob;
+      let ext: string;
+      if (exportFormat === "bmp") {
+        blob = canvasToBmp(workCanvas);
+        ext = "bmp";
+      } else if (exportFormat === "ico") {
+        blob = await canvasToIco(workCanvas);
+        ext = "ico";
+      } else {
+        let source = workCanvas;
+        if (exportFormat === "jpeg") {
+          const flat = createCanvas(workCanvas.width, workCanvas.height);
+          const ctx = get2d(flat, true);
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, flat.width, flat.height);
+          ctx.drawImage(workCanvas, 0, 0);
+          source = flat;
+        }
+        const type =
+          exportFormat === "png"
+            ? "image/png"
+            : exportFormat === "jpeg"
+              ? "image/jpeg"
+              : "image/webp";
+        const quality = exportFormat === "png" ? undefined : exportQuality / 100;
+        blob = await canvasToBlob(source, type, quality);
+        ext = exportFormat === "jpeg" ? "jpg" : exportFormat;
+      }
+      downloadBlob(blob, `${baseName(fileName)}.${ext}`);
+      toast.success(`Imagen descargada (${ext.toUpperCase()})`);
+    } catch {
+      toast.error("No se pudo exportar la imagen");
+    }
+  }, [workCanvas, exportFormat, exportQuality, fileName]);
+
   const handleNewImage = useCallback(() => {
     setOriginalCanvas(null);
     setWorkCanvas(null);
@@ -442,6 +573,9 @@ export function ImageTool() {
     setExcludedColors(new Set());
     setTraceState(null);
     setDetectedColors(DEFAULT_COLORS);
+    setCropActive(false);
+    setCropRect(null);
+    pristineRef.current = null;
     setProgress(null);
     resetHistory();
   }, [resetHistory]);
@@ -605,6 +739,8 @@ export function ImageTool() {
             <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
               {tab !== "background" ? (
                 <Scissors className="size-4" />
+              ) : cropActive ? (
+                <Crop className="size-4" />
               ) : tool === "wand" ? (
                 <Wand2 className="size-4" />
               ) : (
@@ -613,11 +749,13 @@ export function ImageTool() {
               <span className="font-medium text-foreground">
                 {tab !== "background"
                   ? "Vista vectorial"
-                  : tool === "wand"
-                    ? "Varita mágica"
-                    : "Pincel"}
+                  : cropActive
+                    ? "Recorte"
+                    : tool === "wand"
+                      ? "Varita mágica"
+                      : "Pincel"}
               </span>
-              {tab === "background" ? (
+              {tab === "background" && !cropActive ? (
                 <span>· {brush.mode === "erase" ? "Quitar" : "Mantener"}</span>
               ) : null}
             </div>
@@ -656,6 +794,9 @@ export function ImageTool() {
                 tolerance={tolerance}
                 enabled={status === "ready"}
                 version={version}
+                cropActive={cropActive}
+                cropRect={cropRect}
+                onCropRectChange={setCropRect}
                 onStroke={handleStroke}
               />
             ) : traceResult && visibleLayers.length > 0 && visibleSvg ? (
@@ -702,11 +843,93 @@ export function ImageTool() {
             className="w-full"
           >
             <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="background">Fondo</TabsTrigger>
+              <TabsTrigger value="background">Editar</TabsTrigger>
               <TabsTrigger value="vector">Vector</TabsTrigger>
             </TabsList>
 
             <TabsContent value="background" className="mt-4 space-y-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Crop className="size-4" />
+                    Transformar
+                  </CardTitle>
+                  <CardDescription>
+                    Recorta, gira o voltea. Los cambios se aplican también a la
+                    vectorización.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => applyTransform("rotL")}
+                    >
+                      <RotateCcw className="size-3.5" />
+                      Girar izq.
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => applyTransform("rotR")}
+                    >
+                      <RotateCw className="size-3.5" />
+                      Girar der.
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => applyTransform("flipH")}
+                    >
+                      <FlipHorizontal2 className="size-3.5" />
+                      Voltear H
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => applyTransform("flipV")}
+                    >
+                      <FlipVertical2 className="size-3.5" />
+                      Voltear V
+                    </Button>
+                  </div>
+
+                  {cropActive ? (
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">
+                        Arrastra sobre la imagen para elegir el área a recortar.
+                      </p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button size="sm" onClick={applyCrop}>
+                          Aplicar recorte
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={cancelCrop}
+                        >
+                          Cancelar
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => {
+                        setCropActive(true);
+                        setCropRect(null);
+                      }}
+                    >
+                      <Crop className="size-3.5" />
+                      Recortar
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">Quitar fondo</CardTitle>
@@ -857,6 +1080,66 @@ export function ImageTool() {
                   >
                     <RotateCcw className="size-4" />
                     Volver a la original
+                  </Button>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Download className="size-4" />
+                    Descargar imagen
+                  </CardTitle>
+                  <CardDescription>
+                    Guarda el resultado con tus cambios (recorte, giro, fondo)
+                    en el formato que necesites.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>Formato</Label>
+                    <Select
+                      value={exportFormat}
+                      onValueChange={(value: string) =>
+                        setExportFormat(value as ExportFormat)
+                      }
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="png">PNG (transparente)</SelectItem>
+                        <SelectItem value="jpeg">JPG (fondo blanco)</SelectItem>
+                        <SelectItem value="webp">WebP</SelectItem>
+                        <SelectItem value="bmp">BMP (fondo blanco)</SelectItem>
+                        <SelectItem value="ico">ICO (icono 256px)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {exportFormat === "jpeg" || exportFormat === "webp" ? (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label>Calidad</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {exportQuality}%
+                        </span>
+                      </div>
+                      <Slider
+                        min={40}
+                        max={100}
+                        step={1}
+                        value={[exportQuality]}
+                        onValueChange={(values: number[]) =>
+                          setExportQuality(values[0])
+                        }
+                      />
+                    </div>
+                  ) : null}
+
+                  <Button className="w-full" onClick={handleExportImage}>
+                    <Download className="size-4" />
+                    Descargar
                   </Button>
                 </CardContent>
               </Card>
