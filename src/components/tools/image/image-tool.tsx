@@ -29,6 +29,7 @@ import {
   Save,
   Scaling,
   Scissors,
+  SlidersHorizontal,
   Sparkles,
   Undo2,
   Unlock,
@@ -37,13 +38,7 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -94,6 +89,7 @@ type Status = "empty" | "ready" | "removing";
 type ExportFormat = "png" | "jpeg" | "webp" | "bmp" | "ico";
 type SizeUnit = "px" | "cm" | "mm";
 type EditSection = "size" | "bg" | "export";
+type VectorSection = "settings" | "export";
 
 const { useStepper } = defineStepper([
   { id: "background", title: "Editar" },
@@ -420,6 +416,7 @@ export function ImageTool() {
   const [sizeUnit, setSizeUnit] = useState<SizeUnit>("px");
   const [dpi, setDpi] = useState(300);
   const [editSection, setEditSection] = useState<EditSection>("size");
+  const [vectorSection, setVectorSection] = useState<VectorSection>("settings");
   const [widthDraft, setWidthDraft] = useState<string | null>(null);
   const [heightDraft, setHeightDraft] = useState<string | null>(null);
 
@@ -641,24 +638,6 @@ export function ImageTool() {
     }
   }, [originalCanvas, resetHistory, syncDetectedColors]);
 
-  const handleResetEdits = useCallback(() => {
-    const pristine = pristineRef.current;
-    if (!pristine) return;
-    const work = createCanvas(pristine.width, pristine.height);
-    get2d(work, true).drawImage(pristine, 0, 0);
-    const base = createCanvas(pristine.width, pristine.height);
-    get2d(base, true).drawImage(pristine, 0, 0);
-    setOriginalCanvas(base);
-    setWorkCanvas(work);
-    setExcludedColors(new Set());
-    setTraceState(null);
-    setCropActive(false);
-    setCropRect(null);
-    resetHistory();
-    syncDetectedColors(work);
-    setVersion((value) => value + 1);
-  }, [resetHistory, syncDetectedColors]);
-
   const applyTransform = useCallback(
     (kind: TransformKind) => {
       if (!workCanvas || !originalCanvas) return;
@@ -869,6 +848,15 @@ export function ImageTool() {
     });
   }, []);
 
+  const resetTraceSettings = useCallback(() => {
+    setTraceSettings((settings) => ({
+      ...DEFAULT_TRACE_SETTINGS,
+      mode: settings.mode,
+      numberofcolors: initialColorCount(detectedColors),
+    }));
+    setExcludedColors(new Set());
+  }, [detectedColors]);
+
   const maxColors = Math.max(
     2,
     Math.min(MAX_COLORS, detectedColors || MAX_COLORS)
@@ -1018,26 +1006,38 @@ export function ImageTool() {
             </div>
 
             <div className="ml-auto flex items-center gap-1">
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                onClick={handleUndo}
-                disabled={!canUndo}
-                aria-label="Deshacer"
-                title="Deshacer"
-              >
-                <Undo2 className="size-4" />
-              </Button>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                onClick={handleRedo}
-                disabled={!canRedo}
-                aria-label="Rehacer"
-                title="Rehacer"
-              >
-                <Redo2 className="size-4" />
-              </Button>
+              {tab === "background" ? (
+                <>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={handleUndo}
+                    disabled={!canUndo}
+                    aria-label="Deshacer"
+                    title="Deshacer"
+                  >
+                    <Undo2 className="size-4" />
+                  </Button>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={handleRedo}
+                    disabled={!canRedo}
+                    aria-label="Rehacer"
+                    title="Rehacer"
+                  >
+                    <Redo2 className="size-4" />
+                  </Button>
+                </>
+              ) : (
+                <span className="px-2 text-xs tabular-nums text-muted-foreground">
+                  {tracing
+                    ? "Vectorizando…"
+                    : allLayers.length > 0
+                      ? `${visibleLayers.length}/${allLayers.length} colores`
+                      : "Sin formas"}
+                </span>
+              )}
             </div>
           </div>
 
@@ -1248,7 +1248,7 @@ export function ImageTool() {
 
                   <Separator />
 
-                  <div className="space-y-1.5">
+                  <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <Label className="flex items-center gap-1.5">
                         <Scaling className="size-3.5" />
@@ -1260,6 +1260,7 @@ export function ImageTool() {
                           : `≈ ${Math.round(resizeW)} × ${Math.round(resizeH)} px`}
                       </span>
                     </div>
+
                     <div className="flex items-end gap-2">
                       <div className="flex-1 space-y-1.5">
                         <Label htmlFor="resize-width">Ancho</Label>
@@ -1277,119 +1278,119 @@ export function ImageTool() {
                           onBlur={() => setWidthDraft(null)}
                         />
                       </div>
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      onClick={() => setResizeLocked((value) => !value)}
-                      aria-label={
-                        resizeLocked
-                          ? "Desbloquear proporción"
-                          : "Bloquear proporción"
-                      }
-                      title={
-                        resizeLocked
-                          ? "Proporción bloqueada"
-                          : "Proporción libre"
-                      }
-                    >
-                      {resizeLocked ? (
-                        <Lock className="size-4" />
-                      ) : (
-                        <Unlock className="size-4" />
-                      )}
-                    </Button>
-                    <div className="flex-1 space-y-1.5">
-                      <Label htmlFor="resize-height">Alto</Label>
-                      <Input
-                        id="resize-height"
-                        type="text"
-                        inputMode="decimal"
-                        value={
-                          heightDraft ??
-                          String(displaySize(resizeH, sizeUnit, dpi))
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        onClick={() => setResizeLocked((value) => !value)}
+                        aria-label={
+                          resizeLocked
+                            ? "Desbloquear proporción"
+                            : "Bloquear proporción"
                         }
-                        onChange={(event) =>
-                          handleHeightInput(event.target.value)
+                        title={
+                          resizeLocked
+                            ? "Proporción bloqueada"
+                            : "Proporción libre"
                         }
-                        onBlur={() => setHeightDraft(null)}
-                      />
-                    </div>
-                    <Button
-                      size="icon-sm"
-                      onClick={() => applyResize(resizeW, resizeH)}
-                      disabled={
-                        !workCanvas ||
-                        (resizeW === workCanvas.width &&
-                          resizeH === workCanvas.height)
-                      }
-                      aria-label="Aplicar tamaño"
-                      title="Aplicar tamaño"
-                    >
-                      <Save className="size-4" />
-                    </Button>
-                  </div>
-                  </div>
-
-                  <div className="flex items-end gap-2">
-                    <div className="flex-1 space-y-1.5">
-                      <Label htmlFor="size-unit">Unidad</Label>
-                      <Select
-                        value={sizeUnit}
-                        onValueChange={(value: string) => {
-                          setSizeUnit(value as SizeUnit);
-                          setWidthDraft(null);
-                          setHeightDraft(null);
-                        }}
                       >
-                        <SelectTrigger id="size-unit" className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="px">Píxeles (px)</SelectItem>
-                          <SelectItem value="cm">Centímetros (cm)</SelectItem>
-                          <SelectItem value="mm">Milímetros (mm)</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    {sizeUnit !== "px" ? (
-                      <div className="w-24 space-y-1.5">
-                        <Label htmlFor="size-dpi">DPI</Label>
+                        {resizeLocked ? (
+                          <Lock className="size-4" />
+                        ) : (
+                          <Unlock className="size-4" />
+                        )}
+                      </Button>
+                      <div className="flex-1 space-y-1.5">
+                        <Label htmlFor="resize-height">Alto</Label>
                         <Input
-                          id="size-dpi"
-                          type="number"
-                          min={1}
-                          value={dpi}
-                          onChange={(event) => {
-                            const value = Number(event.target.value);
-                            if (Number.isFinite(value) && value > 0) {
-                              setDpi(Math.round(value));
-                              setWidthDraft(null);
-                              setHeightDraft(null);
-                            }
-                          }}
+                          id="resize-height"
+                          type="text"
+                          inputMode="decimal"
+                          value={
+                            heightDraft ??
+                            String(displaySize(resizeH, sizeUnit, dpi))
+                          }
+                          onChange={(event) =>
+                            handleHeightInput(event.target.value)
+                          }
+                          onBlur={() => setHeightDraft(null)}
                         />
                       </div>
-                    ) : null}
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {[512, 1024, 2048].map((px) => (
                       <Button
-                        key={px}
+                        size="icon-sm"
+                        onClick={() => applyResize(resizeW, resizeH)}
+                        disabled={
+                          !workCanvas ||
+                          (resizeW === workCanvas.width &&
+                            resizeH === workCanvas.height)
+                        }
+                        aria-label="Aplicar tamaño"
+                        title="Aplicar tamaño"
+                      >
+                        <Save className="size-4" />
+                      </Button>
+                    </div>
+
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1 space-y-1.5">
+                        <Label htmlFor="size-unit">Unidad</Label>
+                        <Select
+                          value={sizeUnit}
+                          onValueChange={(value: string) => {
+                            setSizeUnit(value as SizeUnit);
+                            setWidthDraft(null);
+                            setHeightDraft(null);
+                          }}
+                        >
+                          <SelectTrigger id="size-unit" className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="px">Píxeles (px)</SelectItem>
+                            <SelectItem value="cm">Centímetros (cm)</SelectItem>
+                            <SelectItem value="mm">Milímetros (mm)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {sizeUnit !== "px" ? (
+                        <div className="w-24 space-y-1.5">
+                          <Label htmlFor="size-dpi">DPI</Label>
+                          <Input
+                            id="size-dpi"
+                            type="number"
+                            min={1}
+                            value={dpi}
+                            onChange={(event) => {
+                              const value = Number(event.target.value);
+                              if (Number.isFinite(value) && value > 0) {
+                                setDpi(Math.round(value));
+                                setWidthDraft(null);
+                                setHeightDraft(null);
+                              }
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      {[512, 1024, 2048].map((px) => (
+                        <Button
+                          key={px}
+                          size="sm"
+                          variant="outline"
+                          onClick={() => applyLongestSide(px)}
+                        >
+                          {px}px
+                        </Button>
+                      ))}
+                      <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => applyLongestSide(px)}
+                        onClick={applyPristineSize}
                       >
-                        {px}px
+                        Original
                       </Button>
-                    ))}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={applyPristineSize}
-                    >
-                      Original
-                    </Button>
+                    </div>
                   </div>
 
                 </TabsContent>
@@ -1434,110 +1435,120 @@ export function ImageTool() {
                       <Wand2 className="size-3.5" />
                       Paso 2 · Retoque manual
                     </p>
-                  <div className="space-y-1.5">
-                    <Label>Herramienta</Label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Button
-                        size="sm"
-                        variant={tool === "brush" ? "default" : "outline"}
-                        aria-pressed={tool === "brush"}
-                        onClick={() => setTool("brush")}
-                      >
-                        <Paintbrush className="size-3.5" />
-                        Pincel
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant={tool === "wand" ? "default" : "outline"}
-                        aria-pressed={tool === "wand"}
-                        onClick={() => setTool("wand")}
-                      >
-                        <Wand2 className="size-3.5" />
-                        Varita
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <Label>Acción</Label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Button
-                        size="sm"
-                        variant={brush.mode === "erase" ? "default" : "outline"}
-                        aria-pressed={brush.mode === "erase"}
-                        onClick={() =>
-                          setBrush((value) => ({ ...value, mode: "erase" }))
-                        }
-                      >
-                        <Eraser className="size-3.5" />
-                        Quitar
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant={brush.mode === "restore" ? "default" : "outline"}
-                        aria-pressed={brush.mode === "restore"}
-                        onClick={() =>
-                          setBrush((value) => ({ ...value, mode: "restore" }))
-                        }
-                      >
-                        <Paintbrush className="size-3.5" />
-                        Mantener
-                      </Button>
-                    </div>
-                  </div>
-
-                  {tool === "brush" ? (
                     <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label htmlFor="brush-size">Tamaño del pincel</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {brush.size}px
-                        </span>
+                      <Label>Herramienta</Label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button
+                          size="sm"
+                          variant={tool === "brush" ? "default" : "outline"}
+                          aria-pressed={tool === "brush"}
+                          onClick={() => setTool("brush")}
+                        >
+                          <Paintbrush className="size-3.5" />
+                          Pincel
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={tool === "wand" ? "default" : "outline"}
+                          aria-pressed={tool === "wand"}
+                          onClick={() => setTool("wand")}
+                        >
+                          <Wand2 className="size-3.5" />
+                          Varita
+                        </Button>
                       </div>
-                      <Slider
-                        id="brush-size"
-                        min={8}
-                        max={200}
-                        step={2}
-                        value={[brush.size]}
-                        onValueChange={(values: number[]) =>
-                          setBrush((value) => ({ ...value, size: values[0] }))
-                        }
-                      />
                     </div>
-                  ) : (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label htmlFor="wand-tolerance">Tolerancia</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {tolerance}%
-                        </span>
-                      </div>
-                      <Slider
-                        id="wand-tolerance"
-                        min={0}
-                        max={60}
-                        step={1}
-                        value={[tolerance]}
-                        onValueChange={(values: number[]) =>
-                          setTolerance(values[0])
-                        }
-                      />
-                    </div>
-                  )}
 
-                  <p className="text-xs text-muted-foreground">
-                    {tool === "wand"
-                      ? "Toca una zona de la imagen para seleccionar y quitar (o mantener) regiones de color similar. Aumenta la tolerancia para abarcar más tonos."
-                      : "Pinta sobre la imagen para quitar o mantener partes."}
-                  </p>
+                    <div className="space-y-1.5">
+                      <Label>Acción</Label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button
+                          size="sm"
+                          variant={
+                            brush.mode === "erase" ? "default" : "outline"
+                          }
+                          aria-pressed={brush.mode === "erase"}
+                          onClick={() =>
+                            setBrush((value) => ({ ...value, mode: "erase" }))
+                          }
+                        >
+                          <Eraser className="size-3.5" />
+                          Quitar
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={
+                            brush.mode === "restore" ? "default" : "outline"
+                          }
+                          aria-pressed={brush.mode === "restore"}
+                          onClick={() =>
+                            setBrush((value) => ({
+                              ...value,
+                              mode: "restore",
+                            }))
+                          }
+                        >
+                          <Paintbrush className="size-3.5" />
+                          Mantener
+                        </Button>
+                      </div>
+                    </div>
+
+                    {tool === "brush" ? (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label htmlFor="brush-size">Tamaño del pincel</Label>
+                          <span className="text-xs tabular-nums text-muted-foreground">
+                            {brush.size}px
+                          </span>
+                        </div>
+                        <Slider
+                          id="brush-size"
+                          min={8}
+                          max={200}
+                          step={2}
+                          value={[brush.size]}
+                          onValueChange={(values: number[]) =>
+                            setBrush((value) => ({
+                              ...value,
+                              size: values[0],
+                            }))
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label htmlFor="wand-tolerance">Tolerancia</Label>
+                          <span className="text-xs tabular-nums text-muted-foreground">
+                            {tolerance}%
+                          </span>
+                        </div>
+                        <Slider
+                          id="wand-tolerance"
+                          min={0}
+                          max={60}
+                          step={1}
+                          value={[tolerance]}
+                          onValueChange={(values: number[]) =>
+                            setTolerance(values[0])
+                          }
+                        />
+                      </div>
+                    )}
+
+                    <p className="text-xs text-muted-foreground">
+                      {tool === "wand"
+                        ? "Toca una zona de la imagen para seleccionar y quitar (o mantener) regiones de color similar. Aumenta la tolerancia para abarcar más tonos."
+                        : "Pinta sobre la imagen para quitar o mantener partes."}
+                    </p>
 
                     <Separator />
 
                     <Button
                       variant="secondary"
                       className="w-full"
-                      onClick={handleResetEdits}
+                      onClick={applyPristineSize}
                     >
                       <RotateCcw className="size-4" />
                       Volver a la original
@@ -1607,18 +1618,19 @@ export function ImageTool() {
               aria-labelledby="step-tab-vector"
               className="mt-4 space-y-4"
             >
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <Scissors className="size-4" />
-                    Vectorizar a SVG
-                  </CardTitle>
-                  <CardDescription>
-                    La vista previa de la izquierda se actualiza sola. Ajusta y
-                    observa el resultado.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
+              <Tabs
+                value={vectorSection}
+                onValueChange={(value: string) =>
+                  setVectorSection(value as VectorSection)
+                }
+                className="gap-4"
+              >
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="settings">Ajustes</TabsTrigger>
+                  <TabsTrigger value="export">Exportar</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="settings" className="space-y-3">
                   <div className="space-y-1.5">
                     <Label>Modo</Label>
                     <Select
@@ -1671,96 +1683,152 @@ export function ImageTool() {
                     </div>
                   ) : null}
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label>Simplificar trazos</Label>
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {traceSettings.pathomit}
-                      </span>
-                    </div>
-                    <Slider
-                      min={0}
-                      max={60}
-                      step={1}
-                      value={[traceSettings.pathomit]}
-                      onValueChange={(values: number[]) =>
-                        setTraceSettings((settings) => ({
-                          ...settings,
-                          pathomit: values[0],
-                        }))
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Descarta formas más pequeñas que este valor (ruido).
-                      Súbelo para un SVG más ligero; bájalo para conservar
-                      detalles finos.
-                    </p>
-                  </div>
+                  <Separator />
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label>Suavizado</Label>
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {traceSettings.blurradius}
-                      </span>
-                    </div>
-                    <Slider
-                      min={0}
-                      max={5}
-                      step={1}
-                      value={[traceSettings.blurradius]}
-                      onValueChange={(values: number[]) =>
-                        setTraceSettings((settings) => ({
-                          ...settings,
-                          blurradius: values[0],
-                        }))
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Difumina antes de vectorizar para bordes más suaves y
-                      limpios.
+                  <div className="space-y-3">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <SlidersHorizontal className="size-3.5" />
+                      Detalle y limpieza
                     </p>
-                  </div>
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="vector-alpha">Umbral de fondo</Label>
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {traceSettings.alphaThreshold}
-                      </span>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label>Simplificar trazos</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {traceSettings.pathomit}
+                        </span>
+                      </div>
+                      <Slider
+                        min={0}
+                        max={60}
+                        step={1}
+                        value={[traceSettings.pathomit]}
+                        onValueChange={(values: number[]) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            pathomit: values[0],
+                          }))
+                        }
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Descarta formas más pequeñas que este valor (ruido).
+                        Súbelo para un SVG más ligero; bájalo para conservar
+                        detalles finos.
+                      </p>
                     </div>
-                    <Slider
-                      id="vector-alpha"
-                      min={0}
-                      max={255}
-                      step={1}
-                      value={[traceSettings.alphaThreshold]}
-                      onValueChange={(values: number[]) =>
-                        setTraceSettings((settings) => ({
-                          ...settings,
-                          alphaThreshold: values[0],
-                        }))
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Súbelo si queda un fondo semitransparente; bájalo si
-                      desaparecen detalles finos.
-                    </p>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label>Suavizado</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {traceSettings.blurradius}
+                        </span>
+                      </div>
+                      <Slider
+                        min={0}
+                        max={5}
+                        step={1}
+                        value={[traceSettings.blurradius]}
+                        onValueChange={(values: number[]) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            blurradius: values[0],
+                          }))
+                        }
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Difumina antes de vectorizar para bordes más suaves y
+                        limpios.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="vector-alpha">Umbral de fondo</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {traceSettings.alphaThreshold}
+                        </span>
+                      </div>
+                      <Slider
+                        id="vector-alpha"
+                        min={0}
+                        max={255}
+                        step={1}
+                        value={[traceSettings.alphaThreshold]}
+                        onValueChange={(values: number[]) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            alphaThreshold: values[0],
+                          }))
+                        }
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Súbelo si queda un fondo semitransparente; bájalo si
+                        desaparecen detalles finos.
+                      </p>
+                    </div>
                   </div>
 
                   <Separator />
 
-                  <ColorPalette
-                    layers={allLayers}
-                    excluded={excludedColors}
-                    onToggle={toggleColor}
-                  />
-
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Palette className="size-3.5" />
+                      Colores del SVG
+                    </p>
+                    {allLayers.length > 0 ? (
+                      <>
+                        <ColorPalette
+                          layers={allLayers}
+                          excluded={excludedColors}
+                          onToggle={toggleColor}
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full"
+                          onClick={() => setExcludedColors(new Set())}
+                          disabled={excludedColors.size === 0}
+                        >
+                          <RotateCcw className="size-3.5" />
+                          Incluir todos los colores
+                        </Button>
+                      </>
+                    ) : (
+                      <p className="py-6 text-center text-xs text-muted-foreground">
+                        {tracing
+                          ? "Vectorizando…"
+                          : "Aún no hay colores detectados."}
+                      </p>
+                    )}
+                  </div>
+
+                  <Separator />
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={resetTraceSettings}
+                  >
+                    <RotateCcw className="size-3.5" />
+                    Restablecer ajustes
+                  </Button>
+                </TabsContent>
+
+                <TabsContent value="export" className="space-y-3">
+                  <div className="space-y-2">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Scissors className="size-3.5" />
                       Vector completo
                     </p>
-                    <FileList files={vectorFiles} />
+                    {vectorFiles.length > 0 ? (
+                      <FileList files={vectorFiles} />
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Aún no hay un SVG para descargar.
+                      </p>
+                    )}
                   </div>
 
                   <Separator />
@@ -1770,13 +1838,23 @@ export function ImageTool() {
                       <Palette className="size-3.5" />
                       Separado por colores
                     </p>
-                    <FileList
-                      files={layerFiles}
-                      onZip={handleDownloadAllLayers}
-                    />
+                    {layerFiles.length > 0 ? (
+                      <FileList
+                        files={layerFiles}
+                        onZip={handleDownloadAllLayers}
+                      />
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Aún no hay capas para descargar.
+                      </p>
+                    )}
                   </div>
-                </CardContent>
-              </Card>
+
+                  <p className="text-[11px] text-muted-foreground">
+                    Solo se incluyen los colores activos.
+                  </p>
+                </TabsContent>
+              </Tabs>
             </div>
           ) : null}
         </div>

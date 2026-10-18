@@ -67,14 +67,6 @@ export function canvasToBlob(
   });
 }
 
-export function cloneImageData(data: ImageData): ImageData {
-  return new ImageData(
-    new Uint8ClampedArray(data.data),
-    data.width,
-    data.height
-  );
-}
-
 export function extractRegion(
   src: ImageData,
   x: number,
@@ -94,8 +86,4 @@ export function extractRegion(
     }
   }
   return out;
-}
-
-export function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
