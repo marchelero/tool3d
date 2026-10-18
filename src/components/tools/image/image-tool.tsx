@@ -1,36 +1,50 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { defineStepper } from "@stepperize/react";
 import { toast } from "sonner";
 import {
+  ChevronRight,
   Crop,
   Download,
   Eraser,
   FlipHorizontal2,
   FlipVertical2,
+  ImageDown,
   ImagePlus,
   Loader2,
+  Lock,
+  Maximize2,
   Paintbrush,
   Palette,
   Redo2,
   RotateCcw,
   RotateCw,
+  Save,
+  Scaling,
   Scissors,
   Sparkles,
   Undo2,
+  Unlock,
   Wand2,
   X,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
+import { Button } from "@/components/ui/button";import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -77,8 +91,17 @@ import { SvgPreview } from "./svg-preview";
 import type { BrushSettings, HistoryEntry, Rect } from "./types";
 
 type Status = "empty" | "ready" | "removing";
-type TabValue = "background" | "vector";
 type ExportFormat = "png" | "jpeg" | "webp" | "bmp" | "ico";
+type SizeUnit = "px" | "cm" | "mm";
+type EditSection = "size" | "bg" | "export";
+
+const { useStepper } = defineStepper([
+  { id: "background", title: "Editar" },
+  { id: "vector", title: "Vector" },
+] as const);
+
+const TOOL_DESCRIPTION =
+  "Carga una imagen, edítala (gira, voltea, recorta, reescala, quítale el fondo y retócala) y después vectorízala a SVG separando sus colores. Todo en tu navegador.";
 
 interface ProgressState {
   label: string;
@@ -103,10 +126,28 @@ const TRACE_DEBOUNCE_MS = 400;
 const MAX_COLORS = 32;
 const DEFAULT_COLORS = 8;
 const INITIAL_COLORS = 4;
+const MAX_LOAD_DIMENSION = 2048;
 
 function initialColorCount(detected: number): number {
   if (detected <= 0) return DEFAULT_COLORS;
   return Math.max(2, Math.min(INITIAL_COLORS, MAX_COLORS, detected));
+}
+
+function downscaleCanvas(
+  source: HTMLCanvasElement,
+  maxDimension: number
+): HTMLCanvasElement {
+  const longest = Math.max(source.width, source.height);
+  if (longest <= maxDimension) return source;
+  const scale = maxDimension / longest;
+  const width = Math.max(1, Math.round(source.width * scale));
+  const height = Math.max(1, Math.round(source.height * scale));
+  const out = createCanvas(width, height);
+  const ctx = get2d(out, true);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, width, height);
+  return out;
 }
 
 function countColors(canvas: HTMLCanvasElement): number {
@@ -132,6 +173,37 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const MM_PER_INCH = 25.4;
+const UNIT_LABEL: Record<SizeUnit, string> = {
+  px: "px",
+  cm: "cm",
+  mm: "mm",
+};
+
+function pxToUnit(px: number, unit: SizeUnit, dpi: number): number {
+  if (unit === "px") return px;
+  const mm = (px / dpi) * MM_PER_INCH;
+  return unit === "mm" ? mm : mm / 10;
+}
+
+function unitToPx(value: number, unit: SizeUnit, dpi: number): number {
+  if (unit === "px") return value;
+  const mm = unit === "mm" ? value : value * 10;
+  return (mm / MM_PER_INCH) * dpi;
+}
+
+function displaySize(px: number, unit: SizeUnit, dpi: number): number {
+  const value = pxToUnit(px, unit, dpi);
+  if (unit === "px") return Math.round(value);
+  return Math.round(value * 100) / 100;
+}
+
+function formatPhysical(px: number, dpi: number, unit: SizeUnit): string {
+  const value = pxToUnit(px, unit, dpi);
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${UNIT_LABEL[unit]}`;
 }
 
 function computeTrace(
@@ -321,7 +393,8 @@ export function ImageTool() {
   const [canRedo, setCanRedo] = useState(false);
   const [traceSettings, setTraceSettings] =
     useState<TraceSettings>(DEFAULT_TRACE_SETTINGS);
-  const [tab, setTab] = useState<TabValue>("background");
+  const stepper = useStepper();
+  const tab = stepper.id;
   const [excludedColors, setExcludedColors] = useState<Set<string>>(new Set());
   const [traceState, setTraceState] = useState<{
     key: string;
@@ -332,10 +405,28 @@ export function ImageTool() {
   const [cropRect, setCropRect] = useState<Rect | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("png");
   const [exportQuality, setExportQuality] = useState(92);
+  const [reduction, setReduction] = useState<{
+    fromW: number;
+    fromH: number;
+    toW: number;
+    toH: number;
+  } | null>(null);
+  const [resizeInput, setResizeInput] = useState<{
+    key: HTMLCanvasElement;
+    w: number;
+    h: number;
+  } | null>(null);
+  const [resizeLocked, setResizeLocked] = useState(true);
+  const [sizeUnit, setSizeUnit] = useState<SizeUnit>("px");
+  const [dpi, setDpi] = useState(300);
+  const [editSection, setEditSection] = useState<EditSection>("size");
+  const [widthDraft, setWidthDraft] = useState<string | null>(null);
+  const [heightDraft, setHeightDraft] = useState<string | null>(null);
 
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
   const pristineRef = useRef<HTMLCanvasElement | null>(null);
+  const fullResRef = useRef<HTMLCanvasElement | null>(null);
 
   const syncDetectedColors = useCallback((canvas: HTMLCanvasElement) => {
     const count = countColors(canvas);
@@ -353,6 +444,28 @@ export function ImageTool() {
     setCanRedo(false);
   }, []);
 
+  const applyBase = useCallback(
+    (base: HTMLCanvasElement) => {
+      const original = createCanvas(base.width, base.height);
+      get2d(original, true).drawImage(base, 0, 0);
+      const work = createCanvas(base.width, base.height);
+      get2d(work, true).drawImage(base, 0, 0);
+      pristineRef.current = original;
+      setOriginalCanvas(original);
+      setWorkCanvas(work);
+      setExcludedColors(new Set());
+      setTraceState(null);
+      setCropActive(false);
+      setCropRect(null);
+      void stepper.goTo("background");
+      resetHistory();
+      syncDetectedColors(work);
+      setStatus("ready");
+      setVersion((value) => value + 1);
+    },
+    [resetHistory, stepper, syncDetectedColors]
+  );
+
   const handleFile = useCallback(
     async (file: File) => {
       if (!file.type.startsWith("image/")) {
@@ -361,27 +474,140 @@ export function ImageTool() {
       }
       try {
         const source = await imageFileToCanvas(file);
-        const work = createCanvas(source.width, source.height);
-        get2d(work, true).drawImage(source, 0, 0);
-        pristineRef.current = source;
-        setOriginalCanvas(source);
-        setWorkCanvas(work);
+        fullResRef.current = source;
+        const base = downscaleCanvas(source, MAX_LOAD_DIMENSION);
+        setReduction(
+          base === source
+            ? null
+            : {
+                fromW: source.width,
+                fromH: source.height,
+                toW: base.width,
+                toH: base.height,
+              }
+        );
         setFileName(file.name);
-        setExcludedColors(new Set());
-        setTraceState(null);
-        setCropActive(false);
-        setCropRect(null);
-        setTab("background");
-        resetHistory();
-        syncDetectedColors(work);
-        setStatus("ready");
-        setVersion((value) => value + 1);
+        applyBase(base);
       } catch {
         toast.error("No se pudo cargar la imagen");
       }
     },
-    [resetHistory, syncDetectedColors]
+    [applyBase]
   );
+
+  const handleUseFullRes = useCallback(() => {
+    const full = fullResRef.current;
+    if (!full) return;
+    setReduction(null);
+    applyBase(full);
+    toast.info("Usando la resolución completa");
+  }, [applyBase]);
+
+  const resizeW =
+    resizeInput && resizeInput.key === workCanvas
+      ? resizeInput.w
+      : (workCanvas?.width ?? 0);
+  const resizeH =
+    resizeInput && resizeInput.key === workCanvas
+      ? resizeInput.h
+      : (workCanvas?.height ?? 0);
+
+  const setResizeWidth = useCallback(
+    (value: number) => {
+      if (!workCanvas || !Number.isFinite(value)) return;
+      const width = Math.max(1, Math.round(value));
+      const ratio =
+        workCanvas.width > 0 ? workCanvas.height / workCanvas.width : 1;
+      setResizeInput({
+        key: workCanvas,
+        w: width,
+        h: resizeLocked ? Math.max(1, Math.round(width * ratio)) : resizeH,
+      });
+    },
+    [workCanvas, resizeLocked, resizeH]
+  );
+
+  const setResizeHeight = useCallback(
+    (value: number) => {
+      if (!workCanvas || !Number.isFinite(value)) return;
+      const height = Math.max(1, Math.round(value));
+      const ratio =
+        workCanvas.height > 0 ? workCanvas.width / workCanvas.height : 1;
+      setResizeInput({
+        key: workCanvas,
+        w: resizeLocked ? Math.max(1, Math.round(height * ratio)) : resizeW,
+        h: height,
+      });
+    },
+    [workCanvas, resizeLocked, resizeW]
+  );
+
+  const applyResize = useCallback(
+    (targetW: number, targetH: number) => {
+      if (!workCanvas || !originalCanvas) return;
+      const width = Math.max(1, Math.round(targetW));
+      const height = Math.max(1, Math.round(targetH));
+      if (width === workCanvas.width && height === workCanvas.height) return;
+      const scaleCanvas = (src: HTMLCanvasElement) => {
+        const out = createCanvas(width, height);
+        const ctx = get2d(out, true);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(src, 0, 0, width, height);
+        return out;
+      };
+      setWorkCanvas(scaleCanvas(workCanvas));
+      setOriginalCanvas(scaleCanvas(originalCanvas));
+      setResizeInput(null);
+      setWidthDraft(null);
+      setHeightDraft(null);
+      setTraceState(null);
+      setCropActive(false);
+      setCropRect(null);
+      resetHistory();
+      setVersion((value) => value + 1);
+    },
+    [workCanvas, originalCanvas, resetHistory]
+  );
+
+  const handleWidthInput = useCallback(
+    (raw: string) => {
+      setWidthDraft(raw);
+      const value = Number(raw);
+      if (raw.trim() !== "" && Number.isFinite(value) && value > 0) {
+        setResizeWidth(unitToPx(value, sizeUnit, dpi));
+      }
+    },
+    [setResizeWidth, sizeUnit, dpi]
+  );
+
+  const handleHeightInput = useCallback(
+    (raw: string) => {
+      setHeightDraft(raw);
+      const value = Number(raw);
+      if (raw.trim() !== "" && Number.isFinite(value) && value > 0) {
+        setResizeHeight(unitToPx(value, sizeUnit, dpi));
+      }
+    },
+    [setResizeHeight, sizeUnit, dpi]
+  );
+
+  const applyLongestSide = useCallback(
+    (px: number) => {
+      if (!workCanvas) return;
+      const longest = Math.max(workCanvas.width, workCanvas.height);
+      if (longest === 0) return;
+      const factor = px / longest;
+      applyResize(workCanvas.width * factor, workCanvas.height * factor);
+    },
+    [workCanvas, applyResize]
+  );
+
+  const applyPristineSize = useCallback(() => {
+    const base = pristineRef.current;
+    if (!base) return;
+    applyBase(base);
+  }, [applyBase]);
 
   const handleRemoveBackground = useCallback(async () => {
     if (!originalCanvas) return;
@@ -570,16 +796,18 @@ export function ImageTool() {
     setWorkCanvas(null);
     setFileName("");
     setStatus("empty");
-    setTab("background");
+    void stepper.goTo("background");
     setExcludedColors(new Set());
     setTraceState(null);
     setDetectedColors(DEFAULT_COLORS);
     setCropActive(false);
     setCropRect(null);
     pristineRef.current = null;
+    fullResRef.current = null;
+    setReduction(null);
     setProgress(null);
     resetHistory();
-  }, [resetHistory]);
+  }, [resetHistory, stepper]);
 
   const traceKey = useMemo(
     () => JSON.stringify([version, traceSettings]),
@@ -697,9 +925,8 @@ export function ImageTool() {
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             Herramienta de imagen
           </h1>
-          <p className="text-sm text-muted-foreground">
-            Sube una imagen para quitar el fondo, retocarla, vectorizarla y
-            separarla por colores.
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            {TOOL_DESCRIPTION}
           </p>
         </div>
         <Dropzone onFile={handleFile} className="min-h-[55vh]" />
@@ -715,7 +942,10 @@ export function ImageTool() {
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">
             Herramienta de imagen
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            {TOOL_DESCRIPTION}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
             {fileName}
             {workCanvas
               ? ` · ${workCanvas.width}×${workCanvas.height}px`
@@ -733,6 +963,32 @@ export function ImageTool() {
           </Button>
         </div>
       </header>
+
+      {reduction ? (
+        <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm">
+          <ImageDown className="size-4 shrink-0 text-amber-500" />
+          <span className="text-muted-foreground">
+            Imagen reducida de{" "}
+            <span className="font-medium text-foreground">
+              {reduction.fromW}×{reduction.fromH}
+            </span>{" "}
+            a{" "}
+            <span className="font-medium text-foreground">
+              {reduction.toW}×{reduction.toH}
+            </span>{" "}
+            para trabajar más rápido.
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto"
+            onClick={handleUseFullRes}
+          >
+            <Maximize2 className="size-4" />
+            Usar resolución completa
+          </Button>
+        </div>
+      ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-3">
@@ -838,62 +1094,136 @@ export function ImageTool() {
         </div>
 
         <div>
-          <Tabs
-            value={tab}
-            onValueChange={(value: string) => setTab(value as TabValue)}
-            className="w-full"
+          <ol
+            aria-label="Pasos"
+            className="flex w-full items-start justify-center gap-1"
           >
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="background">Editar</TabsTrigger>
-              <TabsTrigger value="vector">Vector</TabsTrigger>
-            </TabsList>
+            {stepper.steps.map((step, index) => {
+              const status = stepper.status(step.id);
+              const active = status === "active";
+              const visited = status === "previous";
+              return (
+                <li key={step.id} className="flex items-start">
+                  {index > 0 ? (
+                    <ChevronRight
+                      aria-hidden="true"
+                      className={`mt-2.5 size-4 shrink-0 ${
+                        active || visited
+                          ? "text-primary"
+                          : "text-muted-foreground/50"
+                      }`}
+                    />
+                  ) : null}
+                  <button
+                    type="button"
+                    id={`step-tab-${step.id}`}
+                    aria-current={active ? "step" : undefined}
+                    aria-controls={`step-panel-${step.id}`}
+                    onClick={() => void stepper.goTo(step.id)}
+                    className="group flex flex-col items-center gap-1.5 rounded-lg px-4 py-1 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <span
+                      className={`flex size-9 shrink-0 items-center justify-center rounded-full border text-sm font-semibold tabular-nums transition-colors ${
+                        active
+                          ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                          : visited
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border bg-muted/60 text-muted-foreground group-hover:border-primary/40"
+                      }`}
+                    >
+                      {index + 1}
+                    </span>
+                    <span
+                      className={`text-xs font-medium transition-colors ${
+                        active
+                          ? "text-foreground"
+                          : visited
+                            ? "text-primary"
+                            : "text-muted-foreground group-hover:text-foreground"
+                      }`}
+                    >
+                      {step.title}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
 
-            <TabsContent value="background" className="mt-4 space-y-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <Crop className="size-4" />
-                    Transformar
-                  </CardTitle>
-                  <CardDescription>
-                    Recorta, gira o voltea. Los cambios se aplican también a la
-                    vectorización.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => applyTransform("rotL")}
-                    >
-                      <RotateCcw className="size-3.5" />
-                      Girar izq.
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => applyTransform("rotR")}
-                    >
-                      <RotateCw className="size-3.5" />
-                      Girar der.
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => applyTransform("flipH")}
-                    >
-                      <FlipHorizontal2 className="size-3.5" />
-                      Voltear H
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => applyTransform("flipV")}
-                    >
-                      <FlipVertical2 className="size-3.5" />
-                      Voltear V
-                    </Button>
+          {tab === "background" ? (
+            <div
+              id="step-panel-background"
+              role="region"
+              aria-labelledby="step-tab-background"
+              className="mt-4"
+            >
+              <Tabs
+                value={editSection}
+                onValueChange={(value: string) =>
+                  setEditSection(value as EditSection)
+                }
+                className="gap-4"
+              >
+                <TabsList className="grid w-full grid-cols-3">
+                  <TabsTrigger value="size">Tamaño</TabsTrigger>
+                  <TabsTrigger value="bg">Fondo</TabsTrigger>
+                  <TabsTrigger value="export">Exportar</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="size" className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>Transformar</Label>
+                    <div className="grid grid-cols-5 gap-1.5">
+                      <Button
+                        size="icon-sm"
+                        variant="outline"
+                        onClick={() => applyTransform("rotL")}
+                        aria-label="Girar a la izquierda"
+                        title="Girar a la izquierda"
+                      >
+                        <RotateCcw className="size-4" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="outline"
+                        onClick={() => applyTransform("rotR")}
+                        aria-label="Girar a la derecha"
+                        title="Girar a la derecha"
+                      >
+                        <RotateCw className="size-4" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="outline"
+                        onClick={() => applyTransform("flipH")}
+                        aria-label="Voltear horizontal"
+                        title="Voltear horizontal"
+                      >
+                        <FlipHorizontal2 className="size-4" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant="outline"
+                        onClick={() => applyTransform("flipV")}
+                        aria-label="Voltear vertical"
+                        title="Voltear vertical"
+                      >
+                        <FlipVertical2 className="size-4" />
+                      </Button>
+                      <Button
+                        size="icon-sm"
+                        variant={cropActive ? "default" : "outline"}
+                        aria-pressed={cropActive}
+                        onClick={() => {
+                          setCropActive((value) => !value);
+                          setCropRect(null);
+                        }}
+                        aria-label="Recortar"
+                        title="Recortar"
+                      >
+                        <Crop className="size-4" />
+                      </Button>
+                    </div>
                   </div>
 
                   {cropActive ? (
@@ -914,66 +1244,196 @@ export function ImageTool() {
                         </Button>
                       </div>
                     </div>
-                  ) : (
+                  ) : null}
+
+                  <Separator />
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-1.5">
+                        <Scaling className="size-3.5" />
+                        Tamaño
+                      </Label>
+                      <span className="text-xs tabular-nums text-muted-foreground">
+                        {sizeUnit === "px"
+                          ? `≈ ${formatPhysical(resizeW, dpi, "cm")} × ${formatPhysical(resizeH, dpi, "cm")}`
+                          : `≈ ${Math.round(resizeW)} × ${Math.round(resizeH)} px`}
+                      </span>
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1 space-y-1.5">
+                        <Label htmlFor="resize-width">Ancho</Label>
+                        <Input
+                          id="resize-width"
+                          type="text"
+                          inputMode="decimal"
+                          value={
+                            widthDraft ??
+                            String(displaySize(resizeW, sizeUnit, dpi))
+                          }
+                          onChange={(event) =>
+                            handleWidthInput(event.target.value)
+                          }
+                          onBlur={() => setWidthDraft(null)}
+                        />
+                      </div>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      onClick={() => setResizeLocked((value) => !value)}
+                      aria-label={
+                        resizeLocked
+                          ? "Desbloquear proporción"
+                          : "Bloquear proporción"
+                      }
+                      title={
+                        resizeLocked
+                          ? "Proporción bloqueada"
+                          : "Proporción libre"
+                      }
+                    >
+                      {resizeLocked ? (
+                        <Lock className="size-4" />
+                      ) : (
+                        <Unlock className="size-4" />
+                      )}
+                    </Button>
+                    <div className="flex-1 space-y-1.5">
+                      <Label htmlFor="resize-height">Alto</Label>
+                      <Input
+                        id="resize-height"
+                        type="text"
+                        inputMode="decimal"
+                        value={
+                          heightDraft ??
+                          String(displaySize(resizeH, sizeUnit, dpi))
+                        }
+                        onChange={(event) =>
+                          handleHeightInput(event.target.value)
+                        }
+                        onBlur={() => setHeightDraft(null)}
+                      />
+                    </div>
+                    <Button
+                      size="icon-sm"
+                      onClick={() => applyResize(resizeW, resizeH)}
+                      disabled={
+                        !workCanvas ||
+                        (resizeW === workCanvas.width &&
+                          resizeH === workCanvas.height)
+                      }
+                      aria-label="Aplicar tamaño"
+                      title="Aplicar tamaño"
+                    >
+                      <Save className="size-4" />
+                    </Button>
+                  </div>
+                  </div>
+
+                  <div className="flex items-end gap-2">
+                    <div className="flex-1 space-y-1.5">
+                      <Label htmlFor="size-unit">Unidad</Label>
+                      <Select
+                        value={sizeUnit}
+                        onValueChange={(value: string) => {
+                          setSizeUnit(value as SizeUnit);
+                          setWidthDraft(null);
+                          setHeightDraft(null);
+                        }}
+                      >
+                        <SelectTrigger id="size-unit" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="px">Píxeles (px)</SelectItem>
+                          <SelectItem value="cm">Centímetros (cm)</SelectItem>
+                          <SelectItem value="mm">Milímetros (mm)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {sizeUnit !== "px" ? (
+                      <div className="w-24 space-y-1.5">
+                        <Label htmlFor="size-dpi">DPI</Label>
+                        <Input
+                          id="size-dpi"
+                          type="number"
+                          min={1}
+                          value={dpi}
+                          onChange={(event) => {
+                            const value = Number(event.target.value);
+                            if (Number.isFinite(value) && value > 0) {
+                              setDpi(Math.round(value));
+                              setWidthDraft(null);
+                              setHeightDraft(null);
+                            }
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {[512, 1024, 2048].map((px) => (
+                      <Button
+                        key={px}
+                        size="sm"
+                        variant="outline"
+                        onClick={() => applyLongestSide(px)}
+                      >
+                        {px}px
+                      </Button>
+                    ))}
                     <Button
                       size="sm"
                       variant="outline"
-                      className="w-full"
-                      onClick={() => {
-                        setCropActive(true);
-                        setCropRect(null);
-                      }}
+                      onClick={applyPristineSize}
                     >
-                      <Crop className="size-3.5" />
-                      Recortar
+                      Original
                     </Button>
-                  )}
-                </CardContent>
-              </Card>
+                  </div>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm">Quitar fondo</CardTitle>
-                  <CardDescription>
-                    IA local en tu navegador. Nada se sube a un servidor.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <Button
-                    className="w-full"
-                    onClick={handleRemoveBackground}
-                    disabled={status === "removing"}
-                  >
-                    {status === "removing" ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Sparkles className="size-4" />
-                    )}
-                    Quitar fondo
-                  </Button>
+                </TabsContent>
 
-                  {progress ? (
-                    <div className="space-y-1">
-                      <Progress value={progress.percent} />
-                      <p className="text-xs text-muted-foreground">
-                        {progress.label} · {progress.percent}%
-                      </p>
-                    </div>
-                  ) : null}
-                </CardContent>
-              </Card>
+                <TabsContent value="bg" className="space-y-4">
+                  <div className="space-y-2">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Sparkles className="size-3.5" />
+                      Paso 1 · Quitar fondo
+                    </p>
+                    <Button
+                      className="w-full"
+                      onClick={handleRemoveBackground}
+                      disabled={status === "removing"}
+                    >
+                      {status === "removing" ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="size-4" />
+                      )}
+                      Quitar fondo (IA)
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground">
+                      IA local: tu imagen no se sube a ningún servidor. La
+                      primera vez descarga el modelo (necesita internet) y
+                      luego queda guardado para usarlo sin conexión.
+                    </p>
+                    {progress ? (
+                      <div className="space-y-1">
+                        <Progress value={progress.percent} />
+                        <p className="text-xs text-muted-foreground">
+                          {progress.label} · {progress.percent}%
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <Wand2 className="size-4" />
-                    Retoque manual
-                  </CardTitle>
-                  <CardDescription>
-                    Borra o recupera zonas con el pincel o la varita mágica.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
+                  <Separator />
+
+                  <div className="space-y-4">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Wand2 className="size-3.5" />
+                      Paso 2 · Retoque manual
+                    </p>
                   <div className="space-y-1.5">
                     <Label>Herramienta</Label>
                     <div className="grid grid-cols-2 gap-2">
@@ -1072,31 +1532,20 @@ export function ImageTool() {
                       : "Pinta sobre la imagen para quitar o mantener partes."}
                   </p>
 
-                  <Separator />
+                    <Separator />
 
-                  <Button
-                    variant="secondary"
-                    className="w-full"
-                    onClick={handleResetEdits}
-                  >
-                    <RotateCcw className="size-4" />
-                    Volver a la original
-                  </Button>
-                </CardContent>
-              </Card>
+                    <Button
+                      variant="secondary"
+                      className="w-full"
+                      onClick={handleResetEdits}
+                    >
+                      <RotateCcw className="size-4" />
+                      Volver a la original
+                    </Button>
+                  </div>
+                </TabsContent>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <Download className="size-4" />
-                    Descargar imagen
-                  </CardTitle>
-                  <CardDescription>
-                    Guarda el resultado con tus cambios (recorte, giro, fondo)
-                    en el formato que necesites.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
+                <TabsContent value="export" className="space-y-3">
                   <div className="space-y-1.5">
                     <Label>Formato</Label>
                     <Select
@@ -1138,15 +1587,26 @@ export function ImageTool() {
                     </div>
                   ) : null}
 
+                  <p className="text-[11px] text-muted-foreground">
+                    Guarda el resultado con tus cambios (recorte, giro, fondo).
+                  </p>
+
                   <Button className="w-full" onClick={handleExportImage}>
                     <Download className="size-4" />
                     Descargar
                   </Button>
-                </CardContent>
-              </Card>
-            </TabsContent>
+                </TabsContent>
+              </Tabs>
+            </div>
+          ) : null}
 
-            <TabsContent value="vector" className="mt-4 space-y-4">
+          {tab === "vector" ? (
+            <div
+              id="step-panel-vector"
+              role="region"
+              aria-labelledby="step-tab-vector"
+              className="mt-4 space-y-4"
+            >
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-sm">
@@ -1317,8 +1777,8 @@ export function ImageTool() {
                   </div>
                 </CardContent>
               </Card>
-            </TabsContent>
-          </Tabs>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

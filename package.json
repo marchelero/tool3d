@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@imgly/background-removal": "^1.7.0",
+    "@stepperize/react": "^8.0.1",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.5.0",
     "imagetracerjs": "^1.2.6",
