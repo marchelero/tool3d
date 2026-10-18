@@ -124,7 +124,7 @@ export function svgToDesign(svgText: string): DesignGeometry {
   for (const path of data.paths) {
     const style = path.userData?.style as { display?: string } | undefined;
     if (style?.display === "none") continue;
-    for (const shape of SVGLoader.createShapes(path)) {
+    for (const shape of path.toShapes()) {
       let converted: { geometry: Geom2 | null; points: Vec2[] };
       try {
         converted = shapeToGeom2(shape);

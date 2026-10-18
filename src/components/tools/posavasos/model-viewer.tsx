@@ -1,6 +1,18 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  ArrowDown,
+  Grid3x3,
+  Maximize2,
+  Minimize2,
+  RefreshCw,
+  Rotate3d,
+  Scan,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import {
   Box3,
   DirectionalLight,
@@ -22,13 +34,22 @@ interface ModelViewerProps {
   meshes: MeshPiece[];
   widthMm: number;
   heightMm: number;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   className?: string;
+}
+
+interface FitState {
+  center: Vector3;
+  distance: number;
 }
 
 export function ModelViewer({
   meshes,
   widthMm,
   heightMm,
+  expanded = false,
+  onToggleExpanded,
   className,
 }: ModelViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -36,6 +57,12 @@ export function ModelViewer({
   const cameraRef = useRef<PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const modelRef = useRef<Group | null>(null);
+  const gridRef = useRef<GridHelper | null>(null);
+  const fitRef = useRef<FitState | null>(null);
+  const lastFitSizeRef = useRef<Vector3 | null>(null);
+
+  const [showGrid, setShowGrid] = useState(true);
+  const [autoRotate, setAutoRotate] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -76,6 +103,7 @@ export function ModelViewer({
     controls.dampingFactor = 0.12;
     controls.minDistance = 10;
     controls.maxDistance = 1500;
+    controls.autoRotateSpeed = 1.6;
     controls.target.set(0, 0, 0);
 
     const grid = new GridHelper(600, 60, 0x94a3b8, 0xcbd5e1);
@@ -98,6 +126,7 @@ export function ModelViewer({
     cameraRef.current = camera;
     controlsRef.current = controls;
     modelRef.current = model;
+    gridRef.current = grid;
 
     const render = () => {
       controls.update();
@@ -142,7 +171,51 @@ export function ModelViewer({
       cameraRef.current = null;
       controlsRef.current = null;
       modelRef.current = null;
+      gridRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (grid) grid.visible = showGrid;
+  }, [showGrid]);
+
+  useEffect(() => {
+    const controls = controlsRef.current;
+    if (controls) controls.autoRotate = autoRotate;
+  }, [autoRotate]);
+
+  const applyView = useCallback((mode: "iso" | "top" | "front") => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const fit = fitRef.current;
+    if (!camera || !controls || !fit) return;
+    const { center, distance } = fit;
+    if (mode === "top") {
+      camera.position.set(center.x, center.y - 0.01, center.z + distance);
+    } else if (mode === "front") {
+      camera.position.set(center.x, center.y - distance, center.z + 0.01);
+    } else {
+      camera.position.set(
+        center.x + distance * 0.62,
+        center.y - distance * 0.62,
+        center.z + distance * 0.55
+      );
+    }
+    controls.target.copy(center);
+    controls.update();
+  }, []);
+
+  const zoomBy = useCallback((factor: number) => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const offset = camera.position
+      .clone()
+      .sub(controls.target)
+      .multiplyScalar(factor);
+    camera.position.copy(controls.target).add(offset);
+    controls.update();
   }, []);
 
   useEffect(() => {
@@ -186,17 +259,23 @@ export function ModelViewer({
     const fov = (camera.fov * Math.PI) / 180;
     const distance = (maxDim / 2 / Math.tan(fov / 2)) * 2.2;
 
-    camera.position.set(
-      center.x + distance * 0.62,
-      center.y - distance * 0.62,
-      center.z + distance * 0.55
-    );
+    fitRef.current = { center, distance };
     camera.near = Math.max(0.5, distance / 200);
     camera.far = distance * 20;
     camera.updateProjectionMatrix();
-    controls.target.copy(center);
-    controls.update();
-  }, [meshes]);
+
+    const previous = lastFitSizeRef.current;
+    const resized =
+      !previous ||
+      Math.abs(previous.x - size.x) > 1.5 ||
+      Math.abs(previous.y - size.y) > 1.5 ||
+      Math.abs(previous.z - size.z) > 1.5;
+
+    if (resized) {
+      lastFitSizeRef.current = size.clone();
+      applyView("iso");
+    }
+  }, [applyView, meshes]);
 
   return (
     <div className={`relative ${className ?? ""}`}>
@@ -204,13 +283,92 @@ export function ModelViewer({
         ref={containerRef}
         className="size-full overflow-hidden rounded-lg border bg-gradient-to-b from-muted/40 to-muted/10"
       />
+
+      <div className="absolute top-2 right-2 flex flex-col gap-1.5">
+        {onToggleExpanded ? (
+          <ViewerButton
+            label={expanded ? "Restaurar (Esc)" : "Maximizar vista 3D"}
+            onClick={onToggleExpanded}
+          >
+            {expanded ? (
+              <Minimize2 className="size-4" />
+            ) : (
+              <Maximize2 className="size-4" />
+            )}
+          </ViewerButton>
+        ) : null}
+        <ViewerButton label="Acercar" onClick={() => zoomBy(0.8)}>
+          <ZoomIn className="size-4" />
+        </ViewerButton>
+        <ViewerButton label="Alejar" onClick={() => zoomBy(1.25)}>
+          <ZoomOut className="size-4" />
+        </ViewerButton>
+        <ViewerButton
+          label="Centrar (isométrica)"
+          onClick={() => applyView("iso")}
+        >
+          <RefreshCw className="size-4" />
+        </ViewerButton>
+        <ViewerButton label="Vista superior" onClick={() => applyView("top")}>
+          <ArrowDown className="size-4" />
+        </ViewerButton>
+        <ViewerButton label="Vista frontal" onClick={() => applyView("front")}>
+          <Scan className="size-4" />
+        </ViewerButton>
+        <ViewerButton
+          label={showGrid ? "Ocultar cuadrícula" : "Mostrar cuadrícula"}
+          active={showGrid}
+          onClick={() => setShowGrid((value) => !value)}
+        >
+          <Grid3x3 className="size-4" />
+        </ViewerButton>
+        <ViewerButton
+          label={
+            autoRotate ? "Detener rotación" : "Rotación automática"
+          }
+          active={autoRotate}
+          onClick={() => setAutoRotate((value) => !value)}
+        >
+          <Rotate3d className="size-4" />
+        </ViewerButton>
+      </div>
+
       <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
         {Math.round(widthMm * 10) / 10} mm · {Math.round(heightMm * 100) / 100}{" "}
         mm de alto
       </div>
-      <div className="pointer-events-none absolute right-2 bottom-2 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
-        Arrastra para girar · rueda para acercar
+      <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
+        Arrastra para girar · rueda o botones para acercar
       </div>
     </div>
+  );
+}
+
+function ViewerButton({
+  label,
+  active = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      aria-pressed={active}
+      title={label}
+      className={`flex size-8 items-center justify-center rounded-md border shadow-sm backdrop-blur transition-colors ${
+        active
+          ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
+          : "bg-background/85 text-foreground hover:bg-accent"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

@@ -29,6 +29,7 @@ export interface CoasterSettings {
   bandLayers: number;
   marginMm: number;
   scalePercent: number;
+  designRotation: number;
   baseColor: string;
   designKind: DesignKind;
   designMode: DesignMode;
@@ -52,6 +53,7 @@ export const DEFAULT_COASTER_SETTINGS: CoasterSettings = {
   bandLayers: 4,
   marginMm: 6,
   scalePercent: 100,
+  designRotation: 0,
   baseColor: "#d8dce3",
   designKind: "none",
   designMode: "engrave",
@@ -257,9 +259,16 @@ export function buildCoaster(
   let designWidthMm = 0;
   let designHeightMm = 0;
 
+  const rotation = (settings.designRotation * Math.PI) / 180;
+  const cosRotation = Math.abs(Math.cos(rotation));
+  const sinRotation = Math.abs(Math.sin(rotation));
+
   if (bounds && hasDesign) {
-    const designWidth = Math.max(0.001, bounds.maxX - bounds.minX);
-    const designHeight = Math.max(0.001, bounds.maxY - bounds.minY);
+    const rawWidth = Math.max(0.001, bounds.maxX - bounds.minX);
+    const rawHeight = Math.max(0.001, bounds.maxY - bounds.minY);
+    // El encuadre usa el ancho/alto ya rotados para que el diseño siga entrando.
+    const designWidth = rawWidth * cosRotation + rawHeight * sinRotation;
+    const designHeight = rawWidth * sinRotation + rawHeight * cosRotation;
     const fit = isPattern
       ? 1
       : Math.min(targetSize / designWidth, targetSize / designHeight);
@@ -283,11 +292,13 @@ export function buildCoaster(
   const anchorOverlapMm =
     settings.placement === "full" ? 0 : Math.min(layerHeight, bandMm);
 
-  const place = (geometry: Geom2): Geom2 =>
-    transforms.translate(
-      [offsetX, offsetY],
-      transforms.scale([scale, scale], geometry)
-    );
+  const place = (geometry: Geom2): Geom2 => {
+    const scaled = transforms.scale([scale, scale], geometry);
+    const centered = transforms.translate([offsetX, offsetY], scaled);
+    return rotation === 0
+      ? centered
+      : transforms.rotateZ(rotation, centered);
+  };
 
   // Se extruye cada contorno por separado y se combina en 3D: las uniones 2D
   // con muchos polígonos generan ruido numérico y rompen el contorno.

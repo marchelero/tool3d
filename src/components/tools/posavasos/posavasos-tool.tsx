@@ -7,36 +7,43 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { toast } from "sonner";
 import {
   ArrowLeft,
+  Ban,
   Box,
+  ChevronDown,
+  Circle,
   Coffee,
   Download,
+  Eye,
+  EyeOff,
   FileUp,
+  Hexagon,
+  Image as ImageIcon,
   Layers,
+  LayoutGrid,
   Loader2,
+  Octagon,
   Palette,
   RotateCcw,
   Ruler,
+  Scaling,
   Shapes,
-  SlidersHorizontal,
+  Square,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   DEFAULT_COASTER_SETTINGS,
   buildCoaster,
@@ -57,7 +64,7 @@ import {
 import {
   PATTERN_KINDS,
   PATTERN_LABELS,
-  type PatternKind,
+  patternPreviewUrl,
 } from "@/lib/3d/patterns";
 import { baseName } from "@/lib/image/download";
 import { splitSvgByColor } from "@/lib/image/trace";
@@ -67,6 +74,8 @@ const DESCRIPTION =
   "Diseña un posavasos listo para imprimir: elegí la forma y el tamaño, sumá una imagen vectorizada o un patrón (grabado o en relieve), agregá un labio y exportá el modelo.";
 
 const BUILD_DELAY = 200;
+
+type PanelTab = "base" | "design";
 
 interface BuiltModel {
   key: string;
@@ -82,17 +91,17 @@ const PLACEMENTS: { value: CoasterPlacement; label: string }[] = [
   { value: "full", label: "Todo el alto" },
 ];
 
-const SHAPES: { value: CoasterShape; label: string }[] = [
-  { value: "square", label: "Cuadrado" },
-  { value: "round", label: "Redondo" },
-  { value: "hex", label: "Hexágono" },
-  { value: "oct", label: "Octágono" },
+const SHAPES: { value: CoasterShape; label: string; icon: LucideIcon }[] = [
+  { value: "square", label: "Cuadrado", icon: Square },
+  { value: "round", label: "Redondo", icon: Circle },
+  { value: "hex", label: "Hexágono", icon: Hexagon },
+  { value: "oct", label: "Octágono", icon: Octagon },
 ];
 
-const DESIGN_KINDS: { value: DesignKind; label: string }[] = [
-  { value: "none", label: "Sin diseño" },
-  { value: "image", label: "Imagen" },
-  { value: "pattern", label: "Patrón" },
+const DESIGN_KINDS: { value: DesignKind; label: string; icon: LucideIcon }[] = [
+  { value: "none", label: "Sin diseño", icon: Ban },
+  { value: "image", label: "Imagen", icon: ImageIcon },
+  { value: "pattern", label: "Patrón", icon: LayoutGrid },
 ];
 
 const DESIGN_MODES: { value: DesignMode; label: string }[] = [
@@ -139,7 +148,36 @@ export function PosavasoTool() {
   const [built, setBuilt] = useState<BuiltModel | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [exporting, setExporting] = useState<"stl" | "3mf" | null>(null);
+  const [panel, setPanel] = useState<PanelTab>("base");
+  const [expanded, setExpanded] = useState(false);
+  const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({
+    shape: true,
+    design: true,
+  });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const togglePanel = useCallback((id: string) => {
+    setOpenPanels((current) => ({ ...current, [id]: !current[id] }));
+  }, []);
+
+  const allPanelsOpen = PANEL_IDS.every((id) => openPanels[id]);
+
+  const toggleAllPanels = useCallback(() => {
+    setOpenPanels((current) => {
+      const everyOpen = PANEL_IDS.every((id) => current[id]);
+      if (everyOpen) return {};
+      return Object.fromEntries(PANEL_IDS.map((id) => [id, true]));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [expanded]);
 
   const handoffLayers = useMemo(
     () => (handoffDismissed ? null : (handoff?.layers ?? null)),
@@ -269,41 +307,71 @@ export function PosavasoTool() {
     [settings.bandLayers, settings.layers, settings.placement]
   );
 
+  const patternPreviews = useMemo(
+    () =>
+      PATTERN_KINDS.map((kind) => ({
+        kind,
+        label: PATTERN_LABELS[kind],
+        url: patternPreviewUrl(kind),
+      })),
+    []
+  );
+
   const usingHandoff = !svgLayers && availableLayers.length > 0 && !handoffDismissed;
 
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 py-8">
-      <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <Badge>Posavasos</Badge>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight">
-            Posavasos
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            {DESCRIPTION}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {designKind === "image" && availableLayers.length > 0
-              ? `${availableLayers.length} color(es) desde ${sourceName}`
-              : designKind === "pattern"
-                ? `Patrón ${PATTERN_LABELS[settings.pattern]}`
-                : "Modelo en blanco"}
-            {model
-              ? ` · ${model.totalHeightMm.toFixed(2)} mm de alto`
-              : null}
-          </p>
-        </div>
+    <div
+      className={
+        expanded
+          ? "fixed inset-0 z-50 flex flex-col bg-background"
+          : "mx-auto w-full max-w-7xl px-4 py-8"
+      }
+    >
+      <header
+        className={
+          expanded
+            ? "flex shrink-0 items-center justify-between gap-2 border-b bg-card/60 px-4 py-2"
+            : "mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"
+        }
+      >
+        {expanded ? (
+          <p className="text-sm font-medium">Posavasos · vista ampliada</p>
+        ) : (
+          <div>
+            <Badge>Posavasos</Badge>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight">
+              Posavasos
+            </h1>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+              {DESCRIPTION}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {designKind === "image" && availableLayers.length > 0
+                ? `${availableLayers.length} color(es) desde ${sourceName}`
+                : designKind === "pattern"
+                  ? `Patrón ${PATTERN_LABELS[settings.pattern]}`
+                  : "Modelo en blanco"}
+              {model
+                ? ` · ${model.totalHeightMm.toFixed(2)} mm de alto`
+                : null}
+            </p>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
-          <Button asChild size="sm" variant="outline">
-            <Link href="/tools/image">
-              <ArrowLeft className="size-4" />
-              Ir a Imagen
-            </Link>
-          </Button>
-          <Button size="sm" variant="outline" onClick={handleNew}>
-            <RotateCcw className="size-4" />
-            Nuevo
-          </Button>
+          {expanded ? null : (
+            <Button asChild size="sm" variant="outline">
+              <Link href="/tools/image">
+                <ArrowLeft className="size-4" />
+                Ir a Imagen
+              </Link>
+            </Button>
+          )}
+          {expanded ? null : (
+            <Button size="sm" variant="outline" onClick={handleNew}>
+              <RotateCcw className="size-4" />
+              Nuevo
+            </Button>
+          )}
           <Button
             size="sm"
             disabled={!model || (!!exporting && exporting !== "stl")}
@@ -331,14 +399,30 @@ export function PosavasoTool() {
         </div>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <div className="space-y-3">
-          <div className="relative">
+      <div
+        className={
+          expanded
+            ? "grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_380px]"
+            : "grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]"
+        }
+      >
+              <div
+                className={
+                  expanded ? "flex min-h-0 flex-col" : "space-y-3 lg:sticky lg:top-8"
+                }
+              >
+          <div
+            className={expanded ? "relative min-h-0 flex-1" : "relative"}
+          >
             <ModelViewer
               meshes={meshes}
               widthMm={settings.widthMm}
               heightMm={model?.totalHeightMm ?? 0}
-              className="h-[52vh] min-h-[380px] w-full"
+              expanded={expanded}
+              onToggleExpanded={() => setExpanded((value) => !value)}
+              className={
+                expanded ? "size-full" : "h-[52vh] min-h-[380px] w-full"
+              }
             />
             {building ? (
               <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/60 backdrop-blur-sm">
@@ -350,100 +434,146 @@ export function PosavasoTool() {
             ) : null}
           </div>
 
-          {buildError ? (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2">
-              <p className="text-xs font-medium text-destructive">
-                No se pudo generar el modelo
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                Probá ajustar el diseño o presionar Nuevo. Detalle: {buildError}
-              </p>
-            </div>
-          ) : null}
+          {expanded ? null : (
+            <>
+              {buildError ? (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2">
+                  <p className="text-xs font-medium text-destructive">
+                    No se pudo generar el modelo
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Probá ajustar el diseño o presionar Nuevo. Detalle:{" "}
+                    {buildError}
+                  </p>
+                </div>
+              ) : null}
 
-          {model ? (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <Stat
-                label="Alto total"
-                value={`${model.totalHeightMm.toFixed(2)} mm`}
-              />
-              <Stat
-                label={
-                  settings.designMode === "raise"
-                    ? "Relieve"
-                    : settings.designMode === "through"
-                      ? "Calado"
-                      : "Grabado"
-                }
-                value={
-                  settings.designMode === "through"
-                    ? `${model.totalHeightMm.toFixed(2)} mm`
-                    : `${model.bandMm.toFixed(2)} mm`
-                }
-              />
-              <Stat
-                label="Diseño"
-                value={
-                  designKind === "none"
-                    ? "Sin diseño"
-                    : `${model.designWidthMm.toFixed(1)} mm`
-                }
-              />
-              <Stat label="Colores" value={String(model.colors.length)} />
-            </div>
-          ) : null}
+              {model ? (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <Stat
+                    label="Alto total"
+                    value={`${model.totalHeightMm.toFixed(2)} mm`}
+                  />
+                  <Stat
+                    label={
+                      settings.designMode === "raise"
+                        ? "Relieve"
+                        : settings.designMode === "through"
+                          ? "Calado"
+                          : "Grabado"
+                    }
+                    value={
+                      settings.designMode === "through"
+                        ? `${model.totalHeightMm.toFixed(2)} mm`
+                        : `${model.bandMm.toFixed(2)} mm`
+                    }
+                  />
+                  <Stat
+                    label="Diseño"
+                    value={
+                      designKind === "none"
+                        ? "Sin diseño"
+                        : `${model.designWidthMm.toFixed(1)} mm`
+                    }
+                  />
+                  <Stat label="Colores" value={String(model.colors.length)} />
+                </div>
+              ) : null}
 
-          {model && model.colors.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-muted-foreground">Colores:</span>
-              <span
-                className="size-4 rounded-sm border"
-                style={{ backgroundColor: settings.baseColor }}
-                title="Base"
-              />
-              {model.colors.map((color) => (
-                <span
-                  key={color}
-                  className="size-4 rounded-sm border"
-                  style={{ backgroundColor: color }}
-                  title={color}
-                />
-              ))}
-            </div>
-          ) : null}
+              {model && model.colors.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    Colores:
+                  </span>
+                  <span
+                    className="size-4 rounded-sm border"
+                    style={{ backgroundColor: settings.baseColor }}
+                    title="Base"
+                  />
+                  {model.colors.map((color) => (
+                    <span
+                      key={color}
+                      className="size-4 rounded-sm border"
+                      style={{ backgroundColor: color }}
+                      title={color}
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
 
-        <div className="space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <Palette className="size-3.5" />
-                Diseño
-              </p>
-              <span className="text-[11px] text-muted-foreground">
-                {designKind === "image" && availableLayers.length > 0
-                  ? `${availableLayers.length} color(es)`
-                  : designKind === "pattern"
-                    ? PATTERN_LABELS[settings.pattern]
-                    : "en blanco"}
-              </span>
+        <div
+          className={
+            expanded
+              ? "flex min-h-0 flex-col overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
+              : "space-y-4"
+          }
+        >
+          <Tabs
+            value={panel}
+            onValueChange={(value: string) => setPanel(value as PanelTab)}
+            className="gap-4"
+          >
+            <div className="flex items-center gap-2">
+              <TabsList className="grid flex-1 grid-cols-2">
+                <TabsTrigger value="base">Base</TabsTrigger>
+                <TabsTrigger value="design">Diseño</TabsTrigger>
+              </TabsList>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={toggleAllPanels}
+                aria-label={
+                  allPanelsOpen ? "Colapsar todas las secciones" : "Expandir todas las secciones"
+                }
+                title={allPanelsOpen ? "Colapsar todo" : "Expandir todo"}
+              >
+                {allPanelsOpen ? (
+                  <EyeOff className="size-4" />
+                ) : (
+                  <Eye className="size-4" />
+                )}
+              </Button>
             </div>
 
-            <div className="grid grid-cols-3 gap-1.5">
-              {DESIGN_KINDS.map((kind) => (
-                <Button
-                  key={kind.value}
-                  size="sm"
-                  variant={
-                    designKind === kind.value ? "default" : "outline"
-                  }
-                  aria-pressed={designKind === kind.value}
-                  className="px-1 text-[11px]"
-                  onClick={() => updateSettings({ designKind: kind.value })}
-                >
-                  {kind.label}
-                </Button>
-              ))}
+            <TabsContent value="design" className="space-y-1">
+              <Panel
+                id="design"
+                icon={Palette}
+                title="Diseño"
+                summary={
+                  designKind === "image" && availableLayers.length > 0
+                    ? `${availableLayers.length} color(es)`
+                    : designKind === "pattern"
+                      ? PATTERN_LABELS[settings.pattern]
+                      : "en blanco"
+                }
+                open={openPanels.design}
+                onToggle={togglePanel}
+              >
+                <div className="grid grid-cols-3 gap-1.5">
+              {DESIGN_KINDS.map((kind) => {
+                const KindIcon = kind.icon;
+                const selected = designKind === kind.value;
+                return (
+                  <button
+                    key={kind.value}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => updateSettings({ designKind: kind.value })}
+                    className={`flex h-14 flex-col items-center justify-center gap-1 rounded-md border text-[11px] transition-colors ${
+                      selected
+                        ? "border-primary/60 bg-primary/10 text-primary"
+                        : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
+                    }`}
+                  >
+                    <KindIcon className="size-4" />
+                    {kind.label}
+                  </button>
+                );
+              })}
             </div>
 
             {designKind === "image" ? (
@@ -487,24 +617,46 @@ export function PosavasoTool() {
             {designKind === "pattern" ? (
               <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Patrón</Label>
-                  <Select
-                    value={settings.pattern}
-                    onValueChange={(value: string) =>
-                      updateSettings({ pattern: value as PatternKind })
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {PATTERN_KINDS.map((kind) => (
-                        <SelectItem key={kind} value={kind}>
-                          {PATTERN_LABELS[kind]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs">Patrón</Label>
+                    <span className="text-[11px] text-muted-foreground">
+                      {PATTERN_LABELS[settings.pattern]}
+                    </span>
+                  </div>
+                  <div className="grid max-h-56 grid-cols-3 gap-1.5 overflow-y-auto pr-1">
+                    {patternPreviews.map((preview) => {
+                      const active = settings.pattern === preview.kind;
+                      return (
+                        <button
+                          key={preview.kind}
+                          type="button"
+                          title={preview.label}
+                          aria-label={preview.label}
+                          aria-pressed={active}
+                          onClick={() =>
+                            updateSettings({ pattern: preview.kind })
+                          }
+                          className={
+                            active
+                              ? "flex flex-col items-center gap-1 rounded-md border border-primary bg-primary/10 p-1.5"
+                              : "flex flex-col items-center gap-1 rounded-md border border-border bg-card p-1.5 hover:border-primary/40"
+                          }
+                        >
+                          <Image
+                            src={preview.url}
+                            alt=""
+                            width={32}
+                            height={32}
+                            unoptimized
+                            className="size-8 rounded-sm"
+                          />
+                          <span className="text-[10px] leading-none">
+                            {preview.label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                   <p className="text-[11px] text-muted-foreground">
                     El patrón cubre toda la superficie y se recorta al contorno
                     del posavasos.
@@ -612,34 +764,145 @@ export function PosavasoTool() {
                 ) : null}
               </div>
             ) : null}
-          </div>
+              </Panel>
 
-          <Separator />
-
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                <Shapes className="size-3.5" />
-                Forma
-              </p>
-              <span className="text-[11px] text-muted-foreground">
-                {settings.layers} capas
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-              {SHAPES.map((shape) => (
-                <Button
-                  key={shape.value}
-                  size="sm"
-                  variant={
-                    settings.shape === shape.value ? "default" : "outline"
-                  }
-                  aria-pressed={settings.shape === shape.value}
-                  onClick={() => updateSettings({ shape: shape.value })}
+              {settings.designMode === "through" || designKind === "none" ? null : (
+                <Panel
+                  id="placement"
+                  icon={Box}
+                  title="Ubicación del diseño"
+                  summary={`${bandLayers} de ${settings.layers} capas`}
+                  open={openPanels.placement}
+                  onToggle={togglePanel}
                 >
-                  {shape.label}
-                </Button>
-              ))}
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {PLACEMENTS.map((placement) => (
+                        <Button
+                          key={placement.value}
+                          size="sm"
+                          variant={
+                            settings.placement === placement.value
+                              ? "default"
+                              : "outline"
+                          }
+                          aria-pressed={settings.placement === placement.value}
+                          className="px-1 text-[11px]"
+                          onClick={() =>
+                            updateSettings({ placement: placement.value })
+                          }
+                        >
+                          {placement.label}
+                        </Button>
+                      ))}
+                    </div>
+                    {settings.placement !== "full" ? (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">Capas del relieve</Label>
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            {bandLayers}
+                          </span>
+                        </div>
+                        <Slider
+                          min={1}
+                          max={Math.max(1, settings.layers - 1)}
+                          step={1}
+                          value={[settings.bandLayers]}
+                          onValueChange={([value]) =>
+                            updateSettings({ bandLayers: value })
+                          }
+                        />
+                      </div>
+                    ) : null}
+                </Panel>
+              )}
+
+              {designKind === "none" ? null : (
+                <Panel
+                  id="scale"
+                  icon={Scaling}
+                  title="Tamaño y rotación"
+                  summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
+                  open={openPanels.scale}
+                  onToggle={togglePanel}
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">Escala del diseño</Label>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {settings.scalePercent}%
+                      </span>
+                    </div>
+                    <Slider
+                      min={20}
+                      max={300}
+                      step={5}
+                      value={[settings.scalePercent]}
+                      onValueChange={([value]) =>
+                        updateSettings({ scalePercent: value })
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Podés pasar del 100%: lo que quede fuera del posavasos se
+                      recorta.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">Rotación del diseño</Label>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {settings.designRotation}°
+                      </span>
+                    </div>
+                    <Slider
+                      min={0}
+                      max={345}
+                      step={15}
+                      value={[settings.designRotation]}
+                      onValueChange={([value]) =>
+                        updateSettings({ designRotation: value })
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Gira el diseño sobre el centro del posavasos.
+                    </p>
+                  </div>
+                </Panel>
+              )}
+            </TabsContent>
+
+            <TabsContent value="base" className="space-y-1">
+              <Panel
+                id="shape"
+                icon={Shapes}
+                title="Forma"
+                summary={SHAPES.find((shape) => shape.value === settings.shape)?.label}
+                open={openPanels.shape}
+                onToggle={togglePanel}
+              >
+                <div className="grid grid-cols-4 gap-1.5">
+              {SHAPES.map((shape) => {
+                const ShapeIcon = shape.icon;
+                const selected = settings.shape === shape.value;
+                return (
+                  <button
+                    key={shape.value}
+                    type="button"
+                    aria-pressed={selected}
+                    aria-label={shape.label}
+                    title={shape.label}
+                    onClick={() => updateSettings({ shape: shape.value })}
+                    className={`flex h-12 items-center justify-center rounded-md border transition-colors ${
+                      selected
+                        ? "border-primary/60 bg-primary/10 text-primary"
+                        : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
+                    }`}
+                  >
+                    <ShapeIcon className="size-5" />
+                  </button>
+                );
+              })}
             </div>
             {settings.shape === "square" ? (
               <div className="space-y-1.5 pt-1">
@@ -660,15 +923,16 @@ export function PosavasoTool() {
                 />
               </div>
             ) : null}
-          </div>
+              </Panel>
 
-          <Separator />
-
-          <div className="space-y-3">
-            <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <Ruler className="size-3.5" />
-              Medidas
-            </p>
+              <Panel
+                id="measures"
+                icon={Ruler}
+                title="Medidas"
+                summary={`${settings.widthMm.toFixed(0)} mm · ${settings.layers} capas`}
+                open={openPanels.measures}
+                onToggle={togglePanel}
+              >
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <Label className="text-xs">
@@ -749,15 +1013,20 @@ export function PosavasoTool() {
                 />
               </div>
             ) : null}
-          </div>
+              </Panel>
 
-          <Separator />
-
-          <div className="space-y-3">
-            <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <Layers className="size-3.5" />
-              Borde
-            </p>
+              <Panel
+                id="border"
+                icon={Layers}
+                title="Borde"
+                summary={
+                  settings.borderEnabled
+                    ? `${settings.borderWidthMm.toFixed(1)} mm · ${settings.borderLayers} capas`
+                    : "sin labio"
+                }
+                open={openPanels.border}
+                onToggle={togglePanel}
+              >
             <Button
               size="sm"
               variant={settings.borderEnabled ? "default" : "outline"}
@@ -809,108 +1078,33 @@ export function PosavasoTool() {
                 </div>
               </>
             ) : null}
-          </div>
+              </Panel>
 
-          {settings.designMode === "through" ? null : (
-            <>
-              <Separator />
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                    <Box className="size-3.5" />
-                    Ubicación del diseño
-                  </p>
-                  <span className="text-[11px] text-muted-foreground">
-                    {bandLayers} de {settings.layers} capas
-                  </span>
+              <Panel
+                id="baseColor"
+                icon={Palette}
+                title="Color de la base"
+                summary={settings.baseColor}
+                open={openPanels.baseColor}
+                onToggle={togglePanel}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="coaster-base-color" className="text-xs">
+                    Color de la base
+                  </Label>
+                  <input
+                    id="coaster-base-color"
+                    type="color"
+                    value={settings.baseColor}
+                    onChange={(event) =>
+                      updateSettings({ baseColor: event.target.value })
+                    }
+                    className="h-8 w-14 cursor-pointer rounded-md border bg-transparent"
+                  />
                 </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {PLACEMENTS.map((placement) => (
-                    <Button
-                      key={placement.value}
-                      size="sm"
-                      variant={
-                        settings.placement === placement.value
-                          ? "default"
-                          : "outline"
-                      }
-                      aria-pressed={settings.placement === placement.value}
-                      className="px-1 text-[11px]"
-                      onClick={() =>
-                        updateSettings({ placement: placement.value })
-                      }
-                    >
-                      {placement.label}
-                    </Button>
-                  ))}
-                </div>
-                {settings.placement !== "full" ? (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">Capas del relieve</Label>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {bandLayers}
-                      </span>
-                    </div>
-                    <Slider
-                      min={1}
-                      max={Math.max(1, settings.layers - 1)}
-                      step={1}
-                      value={[settings.bandLayers]}
-                      onValueChange={([value]) =>
-                        updateSettings({ bandLayers: value })
-                      }
-                    />
-                  </div>
-                ) : null}
-              </div>
-            </>
-          )}
-
-          <Separator />
-
-          <div className="space-y-3">
-            <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <SlidersHorizontal className="size-3.5" />
-              Ajustes
-            </p>
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs">Escala del diseño</Label>
-                <span className="text-[11px] tabular-nums text-muted-foreground">
-                  {settings.scalePercent}%
-                </span>
-              </div>
-              <Slider
-                min={20}
-                max={300}
-                step={5}
-                value={[settings.scalePercent]}
-                onValueChange={([value]) =>
-                  updateSettings({ scalePercent: value })
-                }
-              />
-              <p className="text-[11px] text-muted-foreground">
-                Podés pasar del 100%: lo que quede fuera del posavasos se
-                recorta.
-              </p>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="coaster-base-color" className="text-xs">
-                Color de la base
-              </Label>
-              <input
-                id="coaster-base-color"
-                type="color"
-                value={settings.baseColor}
-                onChange={(event) =>
-                  updateSettings({ baseColor: event.target.value })
-                }
-                className="h-8 w-14 cursor-pointer rounded-md border bg-transparent"
-              />
-            </div>
-          </div>
+              </Panel>
+            </TabsContent>
+          </Tabs>
 
           <Separator />
 
@@ -924,6 +1118,61 @@ export function PosavasoTool() {
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+const PANEL_IDS = [
+  "shape",
+  "measures",
+  "border",
+  "baseColor",
+  "design",
+  "placement",
+  "scale",
+] as const;
+
+function Panel({
+  id,
+  title,
+  icon: Icon,
+  summary,
+  open = false,
+  onToggle,
+  children,
+}: {
+  id: string;
+  title: string;
+  icon: LucideIcon;
+  summary?: string;
+  open?: boolean;
+  onToggle: (id: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-b border-border/60 last:border-b-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => onToggle(id)}
+        className="flex w-full cursor-pointer items-center justify-between gap-2 py-2 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <span className="flex items-center gap-2">
+          <Icon className="size-3.5" />
+          {title}
+        </span>
+        <span className="flex items-center gap-2">
+          {summary ? (
+            <span className="text-[11px] font-normal tabular-nums">
+              {summary}
+            </span>
+          ) : null}
+          <ChevronDown
+            className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </span>
+      </button>
+      {open ? <div className="space-y-3 pb-3 pt-1">{children}</div> : null}
     </div>
   );
 }
