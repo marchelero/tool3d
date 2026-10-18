@@ -18,6 +18,7 @@ import {
   FlipVertical2,
   ImageDown,
   ImagePlus,
+  Layers,
   Loader2,
   Lock,
   Maximize2,
@@ -34,6 +35,7 @@ import {
   Undo2,
   Unlock,
   Wand2,
+  Waves,
   X,
 } from "lucide-react";
 
@@ -70,7 +72,10 @@ import {
   rgbToHex,
   splitSvgByColor,
   tracePreparedImage,
+  TRACE_PRESET_LABELS,
+  TRACE_PRESETS,
   type ColorLayer,
+  type TracePreset,
   type TraceSettings,
 } from "@/lib/image/trace";
 import {
@@ -89,7 +94,7 @@ type Status = "empty" | "ready" | "removing";
 type ExportFormat = "png" | "jpeg" | "webp" | "bmp" | "ico";
 type SizeUnit = "px" | "cm" | "mm";
 type EditSection = "size" | "bg" | "export";
-type VectorSection = "settings" | "export";
+type VectorSection = "style" | "detail" | "export";
 
 const { useStepper } = defineStepper([
   { id: "background", title: "Editar" },
@@ -255,18 +260,9 @@ function ColorPalette({
   onToggle: (hex: string) => void;
 }) {
   if (layers.length === 0) return null;
-  const visibleCount = layers.filter(
-    (layer) => !excluded.has(rgbToHex(layer.rgb))
-  ).length;
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <Label>Colores detectados</Label>
-        <span className="text-xs tabular-nums text-muted-foreground">
-          {visibleCount}/{layers.length}
-        </span>
-      </div>
       <div className="flex flex-wrap gap-2">
         {layers.map((layer) => {
           const hex = rgbToHex(layer.rgb);
@@ -416,7 +412,7 @@ export function ImageTool() {
   const [sizeUnit, setSizeUnit] = useState<SizeUnit>("px");
   const [dpi, setDpi] = useState(300);
   const [editSection, setEditSection] = useState<EditSection>("size");
-  const [vectorSection, setVectorSection] = useState<VectorSection>("settings");
+  const [vectorSection, setVectorSection] = useState<VectorSection>("style");
   const [widthDraft, setWidthDraft] = useState<string | null>(null);
   const [heightDraft, setHeightDraft] = useState<string | null>(null);
 
@@ -856,6 +852,28 @@ export function ImageTool() {
     }));
     setExcludedColors(new Set());
   }, [detectedColors]);
+
+  const activePreset = useMemo(() => {
+    const entries = Object.entries(TRACE_PRESETS) as [
+      TracePreset,
+      Partial<TraceSettings>,
+    ][];
+    return (
+      entries.find(([, preset]) =>
+        Object.entries(preset).every(
+          ([key, value]) =>
+            traceSettings[key as keyof TraceSettings] === value
+        )
+      )?.[0] ?? null
+    );
+  }, [traceSettings]);
+
+  const usesColorPalette =
+    traceSettings.mode !== "mono" && traceSettings.mode !== "mono-invert";
+
+  const applyPreset = useCallback((preset: TracePreset) => {
+    setTraceSettings((settings) => ({ ...settings, ...TRACE_PRESETS[preset] }));
+  }, []);
 
   const maxColors = Math.max(
     2,
@@ -1625,71 +1643,181 @@ export function ImageTool() {
                 }
                 className="gap-4"
               >
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="settings">Ajustes</TabsTrigger>
+                <TabsList className="grid w-full grid-cols-3">
+                  <TabsTrigger value="style">Estilo</TabsTrigger>
+                  <TabsTrigger value="detail">Detalle</TabsTrigger>
                   <TabsTrigger value="export">Exportar</TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="settings" className="space-y-3">
+                <TabsContent value="style" className="space-y-4">
                   <div className="space-y-1.5">
-                    <Label>Modo</Label>
-                    <Select
-                      value={traceSettings.mode}
-                      onValueChange={(value: string) =>
-                        setTraceSettings((settings) => ({
-                          ...settings,
-                          mode: value as TraceSettings["mode"],
-                        }))
-                      }
-                    >
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="color">Color</SelectItem>
-                        <SelectItem value="mono">Monocromo (silueta)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  {traceSettings.mode === "color" ? (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Colores</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.numberofcolors}
-                        </span>
-                      </div>
-                      <Slider
-                        min={2}
-                        max={maxColors}
-                        step={1}
-                        value={[Math.min(traceSettings.numberofcolors, maxColors)]}
-                        onValueChange={(values: number[]) =>
-                          setTraceSettings((settings) => ({
-                            ...settings,
-                            numberofcolors: values[0],
-                          }))
-                        }
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        {detectedColors > 0
-                          ? detectedColors > MAX_COLORS
-                            ? `La imagen tiene más de ${MAX_COLORS} colores distintos (tope del control).`
-                            : `Se detectaron ~${detectedColors} colores distintos (tope del control).`
-                          : "Cuántos colores distintos tendrá el SVG."}{" "}
-                        Más colores = más detalle y más peso.
+                    <div className="flex items-center justify-between">
+                      <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                        <Sparkles className="size-3.5" />
+                        Estilo rápido
                       </p>
+                      {activePreset ? (
+                        <span className="text-[11px] text-muted-foreground">
+                          {TRACE_PRESET_LABELS[activePreset]}
+                        </span>
+                      ) : null}
                     </div>
-                  ) : null}
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(Object.keys(TRACE_PRESETS) as TracePreset[]).map(
+                        (preset) => (
+                          <Button
+                            key={preset}
+                            size="sm"
+                            variant={
+                              activePreset === preset ? "default" : "outline"
+                            }
+                            aria-pressed={activePreset === preset}
+                            onClick={() => applyPreset(preset)}
+                          >
+                            {TRACE_PRESET_LABELS[preset]}
+                          </Button>
+                        )
+                      )}
+                    </div>
+                  </div>
 
                   <Separator />
 
                   <div className="space-y-3">
                     <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <SlidersHorizontal className="size-3.5" />
-                      Detalle y limpieza
+                      <Palette className="size-3.5" />
+                      Color
                     </p>
+                    <div className="space-y-1.5">
+                      <Label>Modo</Label>
+                      <Select
+                        value={traceSettings.mode}
+                        onValueChange={(value: string) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            mode: value as TraceSettings["mode"],
+                          }))
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="color">Color</SelectItem>
+                          <SelectItem value="mono">
+                            Monocromo (silueta)
+                          </SelectItem>
+                          <SelectItem value="mono-invert">
+                            Monocromo invertido
+                          </SelectItem>
+                          <SelectItem value="negative">Negativo</SelectItem>
+                          <SelectItem value="grayscale">
+                            Escala de grises
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label>
+                          {usesColorPalette ? "Colores" : "Colores detectados"}
+                        </Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {allLayers.length > 0
+                            ? `${visibleLayers.length}/${allLayers.length}`
+                            : usesColorPalette
+                              ? traceSettings.numberofcolors
+                              : null}
+                        </span>
+                      </div>
+                      {usesColorPalette ? (
+                        <>
+                          <Slider
+                            min={2}
+                            max={maxColors}
+                            step={1}
+                            value={[
+                              Math.min(traceSettings.numberofcolors, maxColors),
+                            ]}
+                            onValueChange={(values: number[]) =>
+                              setTraceSettings((settings) => ({
+                                ...settings,
+                                numberofcolors: values[0],
+                              }))
+                            }
+                          />
+                          <p className="text-[11px] text-muted-foreground">
+                            {detectedColors > 0
+                              ? detectedColors > MAX_COLORS
+                                ? `La imagen tiene más de ${MAX_COLORS} colores distintos (tope del control).`
+                                : `Se detectaron ~${detectedColors} colores distintos (tope del control).`
+                              : "Cuántos colores distintos tendrá el SVG."}{" "}
+                            Más colores = más detalle y más peso.
+                          </p>
+                        </>
+                      ) : null}
+                      {allLayers.length > 0 ? (
+                        <>
+                          <ColorPalette
+                            layers={allLayers}
+                            excluded={excludedColors}
+                            onToggle={toggleColor}
+                          />
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full"
+                            onClick={() => setExcludedColors(new Set())}
+                            disabled={excludedColors.size === 0}
+                          >
+                            <RotateCcw className="size-3.5" />
+                            Incluir todos los colores
+                          </Button>
+                        </>
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground">
+                          {tracing
+                            ? "Vectorizando…"
+                            : "Aún no hay colores detectados."}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                </TabsContent>
+
+                <TabsContent value="detail" className="space-y-4">
+                  <div className="space-y-3">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <SlidersHorizontal className="size-3.5" />
+                      Forma
+                    </p>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label>Fidelidad de curvas</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {traceSettings.fidelity.toFixed(2)}
+                        </span>
+                      </div>
+                      <Slider
+                        min={0.05}
+                        max={3}
+                        step={0.05}
+                        value={[traceSettings.fidelity]}
+                        onValueChange={(values: number[]) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            fidelity: Math.round(values[0] * 100) / 100,
+                          }))
+                        }
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        Bajo = contorno más fiel (bordes redondos, más nodos).
+                        Alto = formas más geométricas y livianas.
+                      </p>
+                    </div>
 
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
@@ -1719,6 +1847,48 @@ export function ImageTool() {
 
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
+                        <Label htmlFor="vector-precision">
+                          Precisión decimal
+                        </Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {traceSettings.roundcoords}
+                        </span>
+                      </div>
+                      <Select
+                        value={String(traceSettings.roundcoords)}
+                        onValueChange={(value: string) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            roundcoords: Number(value) as 0 | 1 | 2,
+                          }))
+                        }
+                      >
+                        <SelectTrigger id="vector-precision" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">0 · trazos rectos</SelectItem>
+                          <SelectItem value="1">1 · equilibrado</SelectItem>
+                          <SelectItem value="2">2 · curvas suaves</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        Decimales de las coordenadas. Más precisión = bordes más
+                        finos y archivo algo más pesado.
+                      </p>
+                    </div>
+                  </div>
+
+                  <Separator />
+
+                  <div className="space-y-3">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Waves className="size-3.5" />
+                      Bordes
+                    </p>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
                         <Label>Suavizado</Label>
                         <span className="text-xs tabular-nums text-muted-foreground">
                           {traceSettings.blurradius}
@@ -1726,7 +1896,7 @@ export function ImageTool() {
                       </div>
                       <Slider
                         min={0}
-                        max={5}
+                        max={8}
                         step={1}
                         value={[traceSettings.blurradius]}
                         onValueChange={(values: number[]) =>
@@ -1741,6 +1911,81 @@ export function ImageTool() {
                         limpios.
                       </p>
                     </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label>Umbral de suavizado</Label>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {traceSettings.blurdelta}
+                        </span>
+                      </div>
+                      <Slider
+                        min={0}
+                        max={255}
+                        step={4}
+                        value={[traceSettings.blurdelta]}
+                        onValueChange={(values: number[]) =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            blurdelta: values[0],
+                          }))
+                        }
+                        disabled={traceSettings.blurradius === 0}
+                      />
+                      <p className="text-[11px] text-muted-foreground">
+                        {traceSettings.blurradius === 0
+                          ? "Subí el Suavizado para activarlo."
+                          : "Cuánta diferencia de color se mezcla al difuminar. Alto = bordes más parejos."}
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <Button
+                        size="sm"
+                        variant={
+                          traceSettings.rightangleenhance
+                            ? "default"
+                            : "outline"
+                        }
+                        aria-pressed={traceSettings.rightangleenhance}
+                        onClick={() =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            rightangleenhance: !settings.rightangleenhance,
+                          }))
+                        }
+                      >
+                        Ángulos rectos
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={
+                          traceSettings.strokewidth > 0 ? "default" : "outline"
+                        }
+                        aria-pressed={traceSettings.strokewidth > 0}
+                        onClick={() =>
+                          setTraceSettings((settings) => ({
+                            ...settings,
+                            strokewidth: settings.strokewidth > 0 ? 0 : 1,
+                          }))
+                        }
+                      >
+                        Sellar costuras
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Ángulos rectos fuerza esquinas a 90° (útil en planos).
+                      Sellar costuras tapa las líneas blancas entre colores.
+                    </p>
+                  </div>
+
+                  <Separator />
+
+                  <div className="space-y-3">
+                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                      <Layers className="size-3.5" />
+                      Fondo
+                    </p>
 
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
@@ -1767,40 +2012,6 @@ export function ImageTool() {
                         desaparecen detalles finos.
                       </p>
                     </div>
-                  </div>
-
-                  <Separator />
-
-                  <div className="space-y-2">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Palette className="size-3.5" />
-                      Colores del SVG
-                    </p>
-                    {allLayers.length > 0 ? (
-                      <>
-                        <ColorPalette
-                          layers={allLayers}
-                          excluded={excludedColors}
-                          onToggle={toggleColor}
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="w-full"
-                          onClick={() => setExcludedColors(new Set())}
-                          disabled={excludedColors.size === 0}
-                        >
-                          <RotateCcw className="size-3.5" />
-                          Incluir todos los colores
-                        </Button>
-                      </>
-                    ) : (
-                      <p className="py-6 text-center text-xs text-muted-foreground">
-                        {tracing
-                          ? "Vectorizando…"
-                          : "Aún no hay colores detectados."}
-                      </p>
-                    )}
                   </div>
 
                   <Separator />

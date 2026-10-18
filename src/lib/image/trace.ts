@@ -1,12 +1,22 @@
 import ImageTracer, { type TraceOptions } from "imagetracerjs";
 
+export type TraceMode =
+  | "color"
+  | "mono"
+  | "mono-invert"
+  | "negative"
+  | "grayscale";
+
 export interface TraceSettings {
-  mode: "mono" | "color";
+  mode: TraceMode;
   numberofcolors: number;
   pathomit: number;
-  ltres: number;
-  qtres: number;
+  fidelity: number;
+  roundcoords: 0 | 1 | 2;
   blurradius: number;
+  blurdelta: number;
+  rightangleenhance: boolean;
+  strokewidth: number;
   alphaThreshold: number;
 }
 
@@ -14,10 +24,61 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
   mode: "color",
   numberofcolors: 8,
   pathomit: 8,
-  ltres: 1,
-  qtres: 1,
+  fidelity: 0.5,
+  roundcoords: 2,
   blurradius: 0,
+  blurdelta: 64,
+  rightangleenhance: false,
+  strokewidth: 1,
   alphaThreshold: 128,
+};
+
+export type TracePreset = "logo" | "detailed" | "illustration" | "silhouette";
+
+export const TRACE_PRESET_LABELS: Record<TracePreset, string> = {
+  logo: "Logo",
+  detailed: "Detallado",
+  illustration: "Ilustración",
+  silhouette: "Silueta",
+};
+
+export const TRACE_PRESETS: Record<TracePreset, Partial<TraceSettings>> = {
+  logo: {
+    fidelity: 0.3,
+    pathomit: 0,
+    roundcoords: 2,
+    rightangleenhance: false,
+    blurradius: 0,
+    blurdelta: 64,
+    strokewidth: 1,
+  },
+  detailed: {
+    fidelity: 0.15,
+    pathomit: 0,
+    roundcoords: 2,
+    rightangleenhance: false,
+    blurradius: 0,
+    blurdelta: 64,
+    strokewidth: 0,
+  },
+  illustration: {
+    fidelity: 0.7,
+    pathomit: 4,
+    roundcoords: 1,
+    rightangleenhance: false,
+    blurradius: 3,
+    blurdelta: 96,
+    strokewidth: 1,
+  },
+  silhouette: {
+    fidelity: 1.5,
+    pathomit: 10,
+    roundcoords: 0,
+    rightangleenhance: true,
+    blurradius: 4,
+    blurdelta: 160,
+    strokewidth: 0,
+  },
 };
 
 const BACKGROUND_SENTINEL = { r: 255, g: 0, b: 255 };
@@ -35,22 +96,24 @@ function buildOptions(
   prepared: ImageData
 ): TraceOptions {
   const alphaThreshold = Math.max(0, Math.min(255, settings.alphaThreshold));
+  const fidelity = Math.max(0.05, Math.min(5, settings.fidelity));
   const base: TraceOptions = {
     pathomit: settings.pathomit,
-    ltres: settings.ltres,
-    qtres: settings.qtres,
+    ltres: fidelity,
+    qtres: fidelity,
     blurradius: settings.blurradius,
+    blurdelta: settings.blurdelta,
     colorquantcycles: 1,
     mincolorratio: 0,
-    rightangleenhance: true,
-    roundcoords: 1,
+    rightangleenhance: settings.rightangleenhance,
+    roundcoords: settings.roundcoords,
+    strokewidth: settings.strokewidth,
     viewbox: false,
     desc: false,
     linefilter: true,
-    strokewidth: 0,
   };
 
-  if (settings.mode === "mono") {
+  if (settings.mode === "mono" || settings.mode === "mono-invert") {
     return {
       ...base,
       colorsampling: 0,
@@ -120,7 +183,10 @@ export function prepareTraceImageData(
   settings: TraceSettings
 ): ImageData {
   const threshold = Math.max(0, Math.min(255, settings.alphaThreshold));
-  const bounds = computeAlphaBounds(imgData, threshold);
+  const bounds =
+    settings.mode === "mono-invert"
+      ? { x: 0, y: 0, width: imgData.width, height: imgData.height }
+      : computeAlphaBounds(imgData, threshold);
 
   if (!bounds) {
     const empty = new ImageData(1, 1);
@@ -150,8 +216,19 @@ export function prepareTraceImageData(
       const srcIndex = ((y0 + row) * imgData.width + (x0 + col)) * 4;
       const dstIndex = (row * width + col) * 4;
       const alpha = imgData.data[srcIndex + 3];
+      const isBackground = alpha < threshold;
 
-      if (alpha < threshold) {
+      if (settings.mode === "mono-invert") {
+        if (isBackground) {
+          out.data[dstIndex] = 0;
+          out.data[dstIndex + 1] = 0;
+          out.data[dstIndex + 2] = 0;
+        } else {
+          out.data[dstIndex] = BACKGROUND_SENTINEL.r;
+          out.data[dstIndex + 1] = BACKGROUND_SENTINEL.g;
+          out.data[dstIndex + 2] = BACKGROUND_SENTINEL.b;
+        }
+      } else if (isBackground) {
         out.data[dstIndex] = BACKGROUND_SENTINEL.r;
         out.data[dstIndex + 1] = BACKGROUND_SENTINEL.g;
         out.data[dstIndex + 2] = BACKGROUND_SENTINEL.b;
@@ -159,6 +236,19 @@ export function prepareTraceImageData(
         out.data[dstIndex] = 0;
         out.data[dstIndex + 1] = 0;
         out.data[dstIndex + 2] = 0;
+      } else if (settings.mode === "negative") {
+        out.data[dstIndex] = 255 - imgData.data[srcIndex];
+        out.data[dstIndex + 1] = 255 - imgData.data[srcIndex + 1];
+        out.data[dstIndex + 2] = 255 - imgData.data[srcIndex + 2];
+      } else if (settings.mode === "grayscale") {
+        const luma = Math.round(
+          imgData.data[srcIndex] * 0.299 +
+            imgData.data[srcIndex + 1] * 0.587 +
+            imgData.data[srcIndex + 2] * 0.114
+        );
+        out.data[dstIndex] = luma;
+        out.data[dstIndex + 1] = luma;
+        out.data[dstIndex + 2] = luma;
       } else {
         out.data[dstIndex] = imgData.data[srcIndex];
         out.data[dstIndex + 1] = imgData.data[srcIndex + 1];
