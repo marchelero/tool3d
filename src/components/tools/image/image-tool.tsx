@@ -68,6 +68,7 @@ import {
 } from "@/lib/image/canvas";
 import { removeBackgroundClient } from "@/lib/image/background";
 import { canvasToBmp, canvasToIco } from "@/lib/image/export";
+import { writePosavasosHandoff } from "@/lib/3d/handoff";
 import {
   DEFAULT_TRACE_SETTINGS,
   estimateColorCount,
@@ -962,6 +963,20 @@ export function ImageTool() {
     () => allLayers.filter((layer) => !excludedColors.has(rgbToHex(layer.rgb))),
     [allLayers, excludedColors]
   );
+
+  const handleSendToPosavasos = useCallback(() => {
+    if (!workCanvas || visibleLayers.length === 0) return;
+    const saved = writePosavasosHandoff({
+      name: fileName,
+      width: workCanvas.width,
+      height: workCanvas.height,
+      layers: visibleLayers.map((layer) => ({ color: layer.color, svg: layer.svg })),
+      savedAt: Date.now(),
+    });
+    if (!saved) {
+      toast.error("No se pudo preparar el diseño para posavasos");
+    }
+  }, [fileName, visibleLayers, workCanvas]);
 
   const toggleColor = useCallback(
     (hex: string) => {
@@ -2259,6 +2274,9 @@ export function ImageTool() {
                   Lleva tu diseño a la herramienta que corresponda para
                   terminar de prepararlo.
                 </p>
+                <p className="text-[11px] text-muted-foreground">
+                  Se envían los {visibleLayers.length} color(es) activos.
+                </p>
               </div>
 
               <div className="grid gap-2">
@@ -2267,7 +2285,7 @@ export function ImageTool() {
                   variant="outline"
                   className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
                 >
-                  <Link href="/tools/posavasos">
+                  <Link href="/tools/posavasos" onClick={handleSendToPosavasos}>
                     <Coffee className="size-5 shrink-0 text-primary" />
                     <span className="flex flex-1 flex-col">
                       <span className="text-sm font-medium">
