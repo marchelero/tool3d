@@ -1,28 +1,17 @@
 import { geometries } from "@jscad/modeling";
 import { BufferAttribute, BufferGeometry } from "three";
 import type { CoasterPiece } from "./coaster";
+import { build3mf, rgbaToHex } from "./threemf";
 import { downloadBlob } from "@/lib/image/download";
 
 type Geom3 = CoasterPiece["geometry"];
-type Rgba = CoasterPiece["color"];
+
+export { rgbaToHex };
 
 export interface MeshPiece {
   name: string;
   hex: string;
   geometry: BufferGeometry;
-}
-
-export function rgbaToHex(color: Rgba): string {
-  const channel = (value: number) =>
-    Math.max(0, Math.min(255, Math.round(value * 255)))
-      .toString(16)
-      .padStart(2, "0");
-  return `#${channel(color[0])}${channel(color[1])}${channel(color[2])}`;
-}
-
-/** 3MF espera #RRGGBBAA en los materiales. */
-function rgbaToHexA(color: Rgba): string {
-  return `${rgbaToHex(color)}FF`.toUpperCase();
 }
 
 export function geom3ToBufferGeometry(geom3: Geom3): BufferGeometry {
@@ -86,74 +75,8 @@ export async function export3mf(
   pieces: CoasterPiece[],
   filename: string
 ): Promise<void> {
-  const { serialize } = await import("@jscad/3mf-serializer");
-  const data = serialize(
-    { unit: "millimeter" },
-    ...pieces.map((piece) => piece.geometry)
-  );
-  const bytes = await addTriangleColors(
-    data[0],
-    pieces.map((piece) => rgbaToHexA(piece.color))
-  );
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
+  const archive = build3mf(pieces, filename);
+  const buffer = new ArrayBuffer(archive.byteLength);
+  new Uint8Array(buffer).set(archive);
   downloadBlob(new Blob([buffer], { type: "model/3mf" }), `${filename}.3mf`);
-}
-
-/**
- * Los laminadores ignoran el color asignado a nivel de objeto, así que se
- * agrega el material por triángulo (pid/p1) al XML del modelo dentro del ZIP.
- * Además se reescriben los colores del catálogo: `colors.rgbToHex` de JSCAD no
- * redondea y devuelve hex corruptos para colores casi enteros.
- */
-async function addTriangleColors(
-  data: ArrayBuffer,
-  colorsHex: string[]
-): Promise<Uint8Array> {
-  const { unzipSync, zipSync } = await import("fflate");
-  const original = new Uint8Array(data);
-  let files: Record<string, Uint8Array>;
-  try {
-    files = unzipSync(original);
-  } catch {
-    return original;
-  }
-
-  const modelPath = Object.keys(files).find((name) =>
-    name.toLowerCase().endsWith("3dmodel.model")
-  );
-  if (!modelPath) return original;
-
-  const xml = new TextDecoder().decode(files[modelPath]);
-
-  let colorIndex = 0;
-  const withColors = xml.replace(
-    /<base\b[^>]*\/>/g,
-    (base: string) => {
-      const hex = colorsHex[colorIndex];
-      colorIndex += 1;
-      if (!hex) return base;
-      return base.replace(/displaycolor="[^"]*"/, `displaycolor="${hex}"`);
-    }
-  );
-
-  const patched = withColors.replace(
-    /<object\b([^>]*)>([\s\S]*?)<\/object>/g,
-    (block: string, attributes: string, body: string) => {
-      const index = /pindex="(\d+)"/.exec(attributes)?.[1];
-      if (index === undefined) return block;
-      const pid = /pid="(\d+)"/.exec(attributes)?.[1] ?? "0";
-      const mesh = body.replace(
-        /<triangle\b([^>]*?)\s*\/>/g,
-        (triangle: string, triangleAttributes: string) =>
-          triangle.includes("p1=")
-            ? triangle
-            : `<triangle${triangleAttributes} pid="${pid}" p1="${index}"/>`
-      );
-      return `<object${attributes}>${mesh}</object>`;
-    }
-  );
-
-  files[modelPath] = new TextEncoder().encode(patched);
-  return zipSync(files, { level: 6 });
 }
