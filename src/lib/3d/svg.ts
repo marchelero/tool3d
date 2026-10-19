@@ -1,8 +1,6 @@
-import { booleans, geometries } from "@jscad/modeling";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
-import type { Shape } from "three";
+import type { Ring } from "./clip2";
 
-type Geom2 = ReturnType<typeof geometries.geom2.fromPoints>;
 type Vec2 = [number, number];
 
 export interface DesignBounds {
@@ -13,7 +11,8 @@ export interface DesignBounds {
 }
 
 export interface DesignGeometry {
-  polygons: Geom2[];
+  /** Contornos (exteriores y huecos) en milímetros, listos para Clipper. */
+  contours: Ring[];
   bounds: DesignBounds | null;
 }
 
@@ -28,17 +27,7 @@ const CURVE_DIVISIONS = 12;
 const POINT_EPSILON = 1e-3;
 const COLLINEAR_RATIO = 1e-3;
 const MAX_PATHS = 600;
-const MAX_POLYGONS = 1200;
-
-function signedArea(points: Vec2[]): number {
-  let sum = 0;
-  for (let index = 0; index < points.length; index += 1) {
-    const [x1, y1] = points[index];
-    const [x2, y2] = points[(index + 1) % points.length];
-    sum += x1 * y2 - x2 * y1;
-  }
-  return sum / 2;
-}
+const MAX_CONTOURS = 6000;
 
 function distance(a: Vec2, b: Vec2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -55,8 +44,8 @@ function isCollinear(prev: Vec2, current: Vec2, next: Vec2): boolean {
 
 /**
  * Los contornos que devuelve three incluyen puntos repetidos y vértices
- * colineales al subdividir las curvas. JSCAD no tolera lados de longitud cero
- * (falla con "geometry is not closed"), así que se limpian antes de usarlos.
+ * colineales al subdividir las curvas. Se limpian antes de pasarlos a Clipper
+ * para evitar lados de longitud cero.
  */
 function cleanRing(ring: Vec2[]): Vec2[] {
   const deduped: Vec2[] = [];
@@ -65,12 +54,13 @@ function cleanRing(ring: Vec2[]): Vec2[] {
     if (last && distance(last, point) <= POINT_EPSILON) continue;
     deduped.push(point);
   }
-  while (deduped.length > 1 && distance(deduped[0], deduped[deduped.length - 1]) <= POINT_EPSILON) {
+  while (
+    deduped.length > 1 &&
+    distance(deduped[0], deduped[deduped.length - 1]) <= POINT_EPSILON
+  ) {
     deduped.pop();
   }
-  if (deduped.length < 3) {
-    return deduped;
-  }
+  if (deduped.length < 3) return deduped;
 
   const total = deduped.length;
   const result: Vec2[] = [];
@@ -84,73 +74,56 @@ function cleanRing(ring: Vec2[]): Vec2[] {
   return result;
 }
 
-function toPolygon(points: { x: number; y: number }[]): Vec2[] {
-  // SVG usa Y hacia abajo; se invierte para trabajar en un plano Y hacia arriba.
-  const polygon = cleanRing(points.map((point) => [point.x, -point.y] as Vec2));
-  if (polygon.length < 3) return [];
-  // JSCAD necesita contornos en sentido antihorario.
-  return signedArea(polygon) < 0 ? polygon.reverse() : polygon;
-}
-
-function shapeToGeom2(shape: Shape): { geometry: Geom2 | null; points: Vec2[] } {
-  const { shape: outer, holes } = shape.extractPoints(CURVE_DIVISIONS);
-  const outerPoints = toPolygon(outer);
-  if (outerPoints.length < 3) {
-    return { geometry: null, points: [] };
-  }
-
-  let geometry = geometries.geom2.fromPoints(outerPoints);
-  for (const hole of holes) {
-    const holePoints = toPolygon(hole);
-    if (holePoints.length < 3) continue;
-    try {
-      geometry = booleans.subtract(
-        geometry,
-        geometries.geom2.fromPoints(holePoints)
-      );
-    } catch {
-      // Si el hueco no es válido se conserva el contorno exterior.
-    }
-  }
-
-  return { geometry, points: outerPoints };
+/** SVG usa Y hacia abajo; se invierte para trabajar en un plano Y hacia arriba. */
+function toRing(points: { x: number; y: number }[]): Vec2[] {
+  const ring = cleanRing(points.map((point) => [point.x, -point.y] as Vec2));
+  return ring.length >= 3 ? ring : [];
 }
 
 export function svgToDesign(svgText: string): DesignGeometry {
   const loader = new SVGLoader();
   const data = loader.parse(svgText);
 
-  const polygons: Geom2[] = [];
+  const contours: Ring[] = [];
   const bounds: DesignBounds = { ...EMPTY_BOUNDS };
+
+  const push = (ring: Vec2[]) => {
+    if (ring.length < 3 || contours.length >= MAX_CONTOURS) return;
+    contours.push(ring);
+    for (const [x, y] of ring) {
+      if (x < bounds.minX) bounds.minX = x;
+      if (x > bounds.maxX) bounds.maxX = x;
+      if (y < bounds.minY) bounds.minY = y;
+      if (y > bounds.maxY) bounds.maxY = y;
+    }
+  };
 
   for (const path of data.paths.slice(0, MAX_PATHS)) {
     const style = path.userData?.style as { display?: string } | undefined;
     if (style?.display === "none") continue;
-    for (const shape of path.toShapes()) {
-      if (polygons.length >= MAX_POLYGONS) break;
-      let converted: { geometry: Geom2 | null; points: Vec2[] };
+    let shapes;
+    try {
+      shapes = path.toShapes();
+    } catch {
+      continue;
+    }
+    for (const shape of shapes) {
+      let points;
       try {
-        converted = shapeToGeom2(shape);
+        points = shape.extractPoints(CURVE_DIVISIONS);
       } catch {
         continue;
       }
-      const { geometry, points } = converted;
-      if (!geometry) continue;
-      polygons.push(geometry);
-      for (const [x, y] of points) {
-        if (x < bounds.minX) bounds.minX = x;
-        if (x > bounds.maxX) bounds.maxX = x;
-        if (y < bounds.minY) bounds.minY = y;
-        if (y > bounds.maxY) bounds.maxY = y;
-      }
+      push(toRing(points.shape));
+      for (const hole of points.holes) push(toRing(hole));
     }
   }
 
-  if (polygons.length === 0) {
-    return { polygons: [], bounds: null };
+  if (contours.length === 0) {
+    return { contours: [], bounds: null };
   }
 
-  return { polygons, bounds };
+  return { contours, bounds };
 }
 
 export function mergeBounds(

@@ -1,18 +1,12 @@
-import {
-  booleans,
-  colors,
-  extrusions,
-  geometries,
-  primitives,
-  transforms,
-} from "@jscad/modeling";
+import { geometries, primitives } from "@jscad/modeling";
 import type { HandoffLayer } from "./handoff";
 import { buildMosaicSvg, type TileKind } from "./mosaic";
 import { patternToSvg, type PatternKind } from "./patterns";
+import { difference, intersection, union, type Ring } from "./clip2";
+import { buildSolid, extrudeRegion, meshQuality, type Geom3, type Slab } from "./extrude";
 import { mergeBounds, svgToDesign, type DesignBounds } from "./svg";
 
 type Geom2 = ReturnType<typeof geometries.geom2.fromPoints>;
-type Geom3 = ReturnType<typeof extrusions.extrudeLinear>;
 type Rgba = [number, number, number, number];
 
 export type CoasterShape = "round" | "square" | "hex" | "oct";
@@ -198,6 +192,31 @@ function buildInnerGeom2(settings: CoasterSettings, insetMm: number): Geom2 {
   });
 }
 
+/** Convierte una geometría 2D de JSCAD en un contorno normalizado (CCW). */
+function geom2ToRings(geom2: Geom2): Ring[] {
+  const points = geometries.geom2.toPoints(geom2);
+  const ring: Ring = points.map((point) => [point[0], point[1]]);
+  return union([ring]);
+}
+
+function transformRings(
+  rings: Ring[],
+  scale: number,
+  offsetX: number,
+  offsetY: number,
+  rotation: number
+): Ring[] {
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  return rings.map((ring) =>
+    ring.map(([x, y]) => {
+      const px = x * scale + offsetX;
+      const py = y * scale + offsetY;
+      return [px * cos - py * sin, px * sin + py * cos] as [number, number];
+    })
+  );
+}
+
 interface DesignSet {
   input: HandoffLayer[];
   mode: DesignMode;
@@ -208,6 +227,25 @@ interface DesignSet {
   fitToBox: boolean;
   /** Aplica la escala y la rotación globales del diseño. */
   applyUserTransform: boolean;
+}
+
+interface Level {
+  z: number;
+  region: Ring[];
+}
+
+function levelsToSlabs(levels: Level[]): Slab[] {
+  const slabs: Slab[] = [];
+  for (let index = 0; index + 1 < levels.length; index += 1) {
+    const height = levels[index + 1].z - levels[index].z;
+    if (height <= 1e-9) continue;
+    slabs.push({
+      zBottom: levels[index].z,
+      zTop: levels[index + 1].z,
+      region: levels[index].region,
+    });
+  }
+  return slabs;
 }
 
 export function buildCoaster(
@@ -225,7 +263,11 @@ export function buildCoaster(
     ? Math.max(layerHeight, Math.round(settings.borderLayers) * layerHeight)
     : 0;
 
-  const baseGeom2 = buildBaseGeom2(settings);
+  const baseRings = geom2ToRings(buildBaseGeom2(settings));
+  const clipRings =
+    borderWidthMm > 0
+      ? geom2ToRings(buildInnerGeom2(settings, borderWidthMm))
+      : baseRings;
 
   const available =
     settings.shape === "round"
@@ -295,66 +337,19 @@ export function buildCoaster(
 
   const colorPieces: CoasterPiece[] = [];
   const colorList: string[] = [];
-  const designSolids: Geom3[] = [];
   let designWidthMm = 0;
   let designHeightMm = 0;
   let reportedBandMm = 0;
-
-  // La unión por array es ~15x más rápida que encadenar uniones de a pares
-  // (con cientos de celdas de patrón la diferencia son segundos de espera).
-  const mergeSolids = (solids: Geom3[]): Geom3 => {
-    if (solids.length === 1) return solids[0];
-    try {
-      const merged = booleans.union(solids);
-      if (geometries.geom3.isA(merged) && merged.polygons.length > 0) {
-        return merged;
-      }
-    } catch {
-      // Se intenta la unión secuencial.
-    }
-    let partial = solids[0];
-    for (let position = 1; position < solids.length; position += 1) {
-      try {
-        partial = booleans.union(partial, solids[position]);
-      } catch {
-        // Se conserva la unión parcial.
-      }
-    }
-    return partial;
-  };
-
-  // Recorte: si el diseño se agranda más allá del posavasos, se descarta todo
-  // lo que quede afuera (incluido el anillo del labio). El volumen de recorte
-  // cubre también por debajo de z=0 para el modo calado (huecos pasantes).
-  const clipGeom2 =
-    borderWidthMm > 0 ? buildInnerGeom2(settings, borderWidthMm) : baseGeom2;
-  const clipMargin = Math.min(layerHeight, totalHeightMm) + 1;
-  const clipBottomZ = -clipMargin;
-  const clipTopZ = totalHeightMm + totalHeightMm + 1;
-  const clipSolid = transforms.translate(
-    [0, 0, clipBottomZ],
-    extrusions.extrudeLinear({ height: clipTopZ - clipBottomZ }, clipGeom2)
-  );
-  const clip = (geometry: Geom3): Geom3 | null => {
-    try {
-      const result = booleans.intersect(geometry, clipSolid);
-      if (!geometries.geom3.isA(result)) return geometry;
-      return result.polygons.length > 0 ? result : null;
-    } catch {
-      return geometry;
-    }
-  };
+  let levels: Level[] | null = null;
 
   const processSet = (set: DesignSet) => {
-    const designLayers: { color: string; polygons: Geom2[] }[] = [];
+    const designLayers: { color: string; contours: Ring[] }[] = [];
     let bounds: DesignBounds | null = null;
 
     for (const layer of set.input) {
-      const { polygons: layerPolygons, bounds: layerBounds } = svgToDesign(
-        layer.svg
-      );
-      if (layerPolygons.length === 0) continue;
-      designLayers.push({ color: layer.color, polygons: layerPolygons });
+      const { contours, bounds: layerBounds } = svgToDesign(layer.svg);
+      if (contours.length === 0) continue;
+      designLayers.push({ color: layer.color, contours });
       bounds = mergeBounds(bounds, layerBounds);
     }
 
@@ -392,179 +387,111 @@ export function buildCoaster(
         : Math.max(1, Math.min(Math.round(set.bandLayers), totalLayers));
     const bandMm = setBandLayers * layerHeight;
     if (reportedBandMm === 0) reportedBandMm = bandMm;
-    const bandZ =
-      set.placement === "bottom"
-        ? 0
-        : set.placement === "top"
-          ? totalHeightMm - bandMm
-          : 0;
+    const bandZ = set.placement === "bottom" ? 0 : totalHeightMm - bandMm;
 
     const raise = set.mode === "raise";
     const through = set.mode === "through";
     // Invertir solo tiene sentido con patrones (una sola "red" de material).
     const invert = set.invert && !through;
-    const designZ = raise ? totalHeightMm : bandZ;
-    // Anclaje de una capa dentro de la base: si los volúmenes quedan apoyados
-    // al ras (caras coplanares) los laminadores los reportan como piezas
-    // flotantes o capas vacías. El solape hace que se fusionen de verdad.
-    const anchorOverlapMm =
-      set.placement === "full" ? 0 : Math.min(layerHeight, bandMm);
-    const fillHeightMm = bandMm + anchorOverlapMm;
-    const fillZ = raise
-      ? totalHeightMm - anchorOverlapMm
-      : set.placement === "bottom"
-        ? bandZ
-        : bandZ - anchorOverlapMm;
 
-    const place = (geometry: Geom2): Geom2 => {
-      const scaled = transforms.scale([scale, scale], geometry);
-      const centered = transforms.translate([offsetX, offsetY], scaled);
-      return rotation === 0
-        ? centered
-        : transforms.rotateZ(rotation, centered);
-    };
+    const placedAll: Ring[] = [];
+    const placedPerLayer: Ring[][] = [];
+    for (const layer of designLayers) {
+      const placed = transformRings(
+        layer.contours,
+        scale,
+        offsetX,
+        offsetY,
+        rotation
+      );
+      placedPerLayer.push(placed);
+      placedAll.push(...placed);
+    }
 
-    // Se extruye cada contorno por separado y se combina en 3D: las uniones 2D
-    // con muchos polígonos generan ruido numérico y rompen el contorno.
-    const extrudePlaced = (
-      polygon: Geom2,
-      heightMm: number,
-      zMm: number
-    ): Geom3 | null => {
-      try {
-        const placed = place(polygon);
-        return transforms.translate(
-          [0, 0, zMm],
-          extrusions.extrudeLinear({ height: heightMm }, placed)
-        );
-      } catch {
-        return null;
+    const design = intersection(union(placedAll), clipRings);
+    if (design.length === 0) return;
+
+    if (through) {
+      levels = [
+        { z: 0, region: difference(baseRings, design) },
+        { z: totalHeightMm, region: difference(baseRings, design) },
+      ];
+      return;
+    }
+
+    const network = invert ? difference(clipRings, design) : [];
+    const bandRegion = invert
+      ? difference(baseRings, network)
+      : difference(baseRings, design);
+    const colorZBottom = raise ? totalHeightMm : bandZ;
+    const colorZTop = raise ? totalHeightMm + bandMm : bandZ + bandMm;
+
+    if (raise) {
+      levels = [
+        { z: 0, region: baseRings },
+        { z: totalHeightMm, region: baseRings },
+      ];
+    } else if (set.placement === "bottom") {
+      levels = [
+        { z: 0, region: bandRegion },
+        { z: bandMm, region: baseRings },
+        { z: totalHeightMm, region: baseRings },
+      ];
+    } else if (set.placement === "full") {
+      levels = [
+        { z: 0, region: bandRegion },
+        { z: totalHeightMm, region: bandRegion },
+      ];
+    } else {
+      levels = [
+        { z: 0, region: baseRings },
+        { z: bandZ, region: bandRegion },
+        { z: totalHeightMm, region: bandRegion },
+      ];
+    }
+
+    if (invert) {
+      if (raise) {
+        const color = designLayers[0].color;
+        colorList.push(color);
+        colorPieces.push({
+          name: "Relieve 1",
+          color: colorToRgba(color),
+          geometry: extrudeRegion(network, colorZBottom, colorZTop - colorZBottom),
+        });
       }
-    };
+      return;
+    }
 
-    const throughMarginMm = anchorOverlapMm + 0.5;
-    designLayers.forEach((layer, index) => {
-      // Calado: el diseño atraviesa todo el espesor y deja huecos.
-      if (through) {
-        const cutSolids: Geom3[] = [];
-        for (const polygon of layer.polygons) {
-          const cut = extrudePlaced(
-            polygon,
-            totalHeightMm + throughMarginMm * 2,
-            -throughMarginMm
-          );
-          if (cut) cutSolids.push(cut);
-        }
-        if (cutSolids.length === 0) return;
-        const cutSolid = clip(mergeSolids(cutSolids));
-        if (cutSolid) designSolids.push(cutSolid);
-        return;
-      }
-
-      // Relieve invertido: se intercambian material y hueco. Ahora la "red"
-      // entre las celdas es la que sobresale (relieve) o la que se rebaja
-      // (grabado), y las celdas quedan como huecos.
-      if (invert) {
-        const slabZ = raise ? fillZ : designZ;
-        const slabHeightMm = raise ? fillHeightMm : bandMm;
-        const cutMarginMm = anchorOverlapMm + 0.5;
-        const cutSolids: Geom3[] = [];
-        for (const polygon of layer.polygons) {
-          const cut = extrudePlaced(
-            polygon,
-            slabHeightMm + cutMarginMm * 2,
-            slabZ - cutMarginMm
-          );
-          if (cut) cutSolids.push(cut);
-        }
-        if (cutSolids.length === 0) return;
-        const cutSolid = mergeSolids(cutSolids);
-        try {
-          const slab = transforms.translate(
-            [0, 0, slabZ],
-            extrusions.extrudeLinear({ height: slabHeightMm }, clipGeom2)
-          );
-          const solid = clip(booleans.subtract(slab, cutSolid));
-          if (!solid) return;
-          if (raise) {
-            const rgba = colorToRgba(layer.color);
-            colorList.push(layer.color);
-            colorPieces.push({
-              name: `Relieve ${index + 1}`,
-              color: rgba,
-              geometry: colors.colorize(rgba, solid),
-            });
-          } else {
-            designSolids.push(solid);
-          }
-        } catch (error) {
-          console.warn("No se pudo invertir el relieve", error);
-        }
-        return;
-      }
-
-      const fillSolids: Geom3[] = [];
-      const cavitySolids: Geom3[] = [];
-      for (const polygon of layer.polygons) {
-        const fill = extrudePlaced(polygon, fillHeightMm, fillZ);
-        if (fill) fillSolids.push(fill);
-        if (!raise) {
-          const cavity = extrudePlaced(polygon, bandMm, designZ);
-          if (cavity) cavitySolids.push(cavity);
-        }
-      }
-      if (fillSolids.length === 0) return;
-
-      const colorSolid = clip(mergeSolids(fillSolids));
-      const cavitySolid =
-        cavitySolids.length > 0 ? clip(mergeSolids(cavitySolids)) : null;
-      if (!colorSolid) return;
-      if (cavitySolid) designSolids.push(cavitySolid);
-
-      const rgba = colorToRgba(layer.color);
-      colorList.push(layer.color);
+    designLayers.forEach((_, index) => {
+      const region = intersection(union(placedPerLayer[index]), clipRings);
+      if (region.length === 0) return;
+      const color = designLayers[index].color;
+      colorList.push(color);
       colorPieces.push({
         name: `Color ${index + 1}`,
-        color: rgba,
-        geometry: colors.colorize(rgba, colorSolid),
+        color: colorToRgba(color),
+        geometry: extrudeRegion(region, colorZBottom, colorZTop - colorZBottom),
       });
     });
   };
 
   sets.forEach(processSet);
 
-  const baseSolid = extrusions.extrudeLinear(
-    { height: totalHeightMm },
-    baseGeom2
-  );
-  let baseCut = baseSolid;
-
-  for (const designSolid of designSolids) {
-    try {
-      baseCut = booleans.subtract(baseCut, designSolid);
-    } catch {
-      // Si un relieve no se puede restar, la base queda sólida en esa zona.
-    }
+  if (!levels) {
+    levels = [
+      { z: 0, region: baseRings },
+      { z: totalHeightMm, region: baseRings },
+    ];
   }
 
   if (borderWidthMm > 0) {
-    try {
-      const ring2 = booleans.subtract(
-        baseGeom2,
-        buildInnerGeom2(settings, borderWidthMm)
-      );
-      const ringAnchor = Math.min(layerHeight, borderHeightMm);
-      const ring3 = transforms.translate(
-        [0, 0, totalHeightMm - ringAnchor],
-        extrusions.extrudeLinear(
-          { height: borderHeightMm + ringAnchor },
-          ring2
-        )
-      );
-      baseCut = booleans.union(baseCut, ring3);
-    } catch {
-      // Si el labio falla, se conserva la base sin labio.
-    }
+    const ringRegion = difference(baseRings, clipRings);
+    levels = [
+      ...levels,
+      { z: totalHeightMm, region: ringRegion },
+      { z: totalHeightMm + borderHeightMm, region: ringRegion },
+    ];
   }
 
   const baseColor = colorToRgba(settings.baseColor);
@@ -572,10 +499,22 @@ export function buildCoaster(
     {
       name: "Base",
       color: baseColor,
-      geometry: colors.colorize(baseColor, baseCut),
+      geometry: buildSolid(levelsToSlabs(levels)),
     },
     ...colorPieces,
   ];
+
+  // Validación de malla: `open > 0` significa que el sólido no cierra y el
+  // laminador lo rechazará; `over > 0` es no-manifold puntual (pinch points del
+  // dibujo) y se tolera.
+  for (const piece of pieces) {
+    const quality = meshQuality(piece.geometry);
+    if (quality.open > 0) {
+      console.warn(
+        `[posavasos] "${piece.name}" no cierra: ${quality.open} aristas abiertas`
+      );
+    }
+  }
 
   return {
     pieces,
