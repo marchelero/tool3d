@@ -62,8 +62,14 @@ declare module "opentype.js" {
 
   interface OpenTypePath {
     commands: PathCommand[];
+    extend(path: OpenTypePath): void;
     toPathData(decimalPlaces?: number): string;
     getBoundingBox(): BoundingBox;
+  }
+
+  interface OpenTypeGlyph {
+    advanceWidth?: number;
+    getPath(x: number, y: number, fontSize: number): OpenTypePath;
   }
 
   interface OpenTypeFont {
@@ -71,6 +77,7 @@ declare module "opentype.js" {
     numGlyphs: number;
     ascender: number;
     descender: number;
+    charToGlyph(char: string): OpenTypeGlyph;
     getPath(
       text: string,
       x: number,

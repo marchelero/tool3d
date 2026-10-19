@@ -44,6 +44,7 @@ import {
   Trash2,
   TriangleAlert,
   Type,
+  Wand2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -229,9 +230,13 @@ export function KeychainTool() {
   const [settings, setSettings] = useState<KeychainSettings>(
     DEFAULT_KEYCHAIN_SETTINGS
   );
+  const [textDraft, setTextDraft] = useState<KeychainTextLine[]>(
+    DEFAULT_KEYCHAIN_SETTINGS.textLines
+  );
   const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
   const [loadingSystemFonts, setLoadingSystemFonts] = useState(false);
   const [systemFontError, setSystemFontError] = useState<string | null>(null);
+  const [fontWarning, setFontWarning] = useState<string | null>(null);
   const [systemFontId, setSystemFontId] = useState<string | null>(null);
   const localFontsAvailable = useSyncExternalStore(
     subscribeNoop,
@@ -373,11 +378,27 @@ export function KeychainTool() {
           if (designKind === "image") {
             layers = imageLayers;
           } else if (designKind === "text") {
-            const font = await loadFont(resolvedSettings.fontId);
+            let font: Awaited<ReturnType<typeof loadFont>>;
+            try {
+              font = await loadFont(resolvedSettings.fontId);
+              if (!cancelled) setFontWarning(null);
+            } catch (fontError) {
+              if (cancelled) return;
+              setFontWarning(
+                `${
+                  fontError instanceof Error
+                    ? fontError.message
+                    : "No se pudo leer la fuente."
+                } Se usó ${KEYCHAIN_FONTS[0].label}.`
+              );
+              font = await loadFont(KEYCHAIN_FONTS[0].id);
+            }
             layers = buildTextLayers(font, settings.textLines, {
               letterSpacingMm: settings.textLetterSpacingMm,
               lineGapMm: settings.textLineGapMm,
             });
+          } else if (!cancelled) {
+            setFontWarning(null);
           }
           if (cancelled) return;
           layers = orderedIndexes
@@ -452,39 +473,35 @@ export function KeychainTool() {
 
   const updateTextLine = useCallback(
     (index: number, patch: Partial<KeychainTextLine>) => {
-      setSettings((current) => ({
-        ...current,
-        textLines: current.textLines.map((line, i) =>
-          i === index ? { ...line, ...patch } : line
-        ),
-      }));
+      setTextDraft((current) =>
+        current.map((line, i) => (i === index ? { ...line, ...patch } : line))
+      );
     },
     []
   );
 
   const addTextLine = useCallback(() => {
-    setSettings((current) =>
-      current.textLines.length >= 3
+    setTextDraft((current) =>
+      current.length >= 3
         ? current
-        : {
-            ...current,
-            textLines: [
-              ...current.textLines,
-              { text: "Texto", sizeMm: 10, color: "#2b3440" },
-            ],
-          }
+        : [...current, { text: "Texto", sizeMm: 10, color: "#2b3440" }]
     );
   }, []);
 
   const removeTextLine = useCallback((index: number) => {
-    setSettings((current) => ({
-      ...current,
-      textLines:
-        current.textLines.length <= 1
-          ? current.textLines
-          : current.textLines.filter((_, i) => i !== index),
-    }));
+    setTextDraft((current) =>
+      current.length <= 1 ? current : current.filter((_, i) => i !== index)
+    );
   }, []);
+
+  const textDraftDirty = useMemo(
+    () => JSON.stringify(textDraft) !== JSON.stringify(settings.textLines),
+    [textDraft, settings.textLines]
+  );
+
+  const applyTextDraft = useCallback(() => {
+    setSettings((current) => ({ ...current, textLines: textDraft }));
+  }, [textDraft]);
 
   const handleNew = useCallback(() => {
     clearPosavasosHandoff();
@@ -493,6 +510,7 @@ export function KeychainTool() {
     setSvgName(null);
     setBuildError(null);
     setSettings(DEFAULT_KEYCHAIN_SETTINGS);
+    setTextDraft(DEFAULT_KEYCHAIN_SETTINGS.textLines);
   }, []);
 
   const handleReset = useCallback(() => {
@@ -520,6 +538,7 @@ export function KeychainTool() {
       borderWidthMm: DEFAULT_KEYCHAIN_SETTINGS.borderWidthMm,
       borderLayers: DEFAULT_KEYCHAIN_SETTINGS.borderLayers,
     }));
+    setTextDraft(DEFAULT_KEYCHAIN_SETTINGS.textLines);
   }, []);
 
   const handleSvgFile = useCallback(async (file: File) => {
@@ -747,9 +766,9 @@ export function KeychainTool() {
                       style={{ backgroundColor: settings.baseColor }}
                       title="Base"
                     />
-                    {model.colors.map((color) => (
+                    {model.colors.map((color, index) => (
                       <span
-                        key={color}
+                        key={`${color}-${index}`}
                         className="size-4 rounded-sm border"
                         style={{ backgroundColor: color }}
                         title={color}
@@ -901,9 +920,9 @@ export function KeychainTool() {
                             : `${imageLayers.length} color(es) desde ${sourceName}.`}
                         </p>
                         <div className="flex flex-wrap gap-1">
-                          {imageLayers.map((layer) => (
+                          {imageLayers.map((layer, index) => (
                             <span
-                              key={layer.color}
+                              key={`${layer.color}-${index}`}
                               className="size-4 rounded-sm border"
                               style={{ backgroundColor: layer.color }}
                               title={layer.color}
@@ -946,7 +965,7 @@ export function KeychainTool() {
                   id="text"
                   icon={Type}
                   title="Texto"
-                  summary={`${settings.textLines.length} línea(s)`}
+                  summary={`${textDraft.length} línea(s)`}
                   open={openPanels.text}
                   onToggle={togglePanel}
                 >
@@ -1015,11 +1034,16 @@ export function KeychainTool() {
                           {systemFontError}
                         </p>
                       ) : null}
+                      {fontWarning ? (
+                        <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                          {fontWarning}
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="space-y-2">
                       <Label className="text-xs">Líneas de texto</Label>
-                      {settings.textLines.map((line, index) => (
+                      {textDraft.map((line, index) => (
                         <div
                           key={index}
                           className="space-y-1.5 rounded-lg border p-2"
@@ -1042,7 +1066,7 @@ export function KeychainTool() {
                               }
                               className="h-8 w-9 shrink-0 cursor-pointer rounded-md border bg-transparent"
                             />
-                            {settings.textLines.length > 1 ? (
+                            {textDraft.length > 1 ? (
                               <Button
                                 size="icon-sm"
                                 variant="ghost"
@@ -1067,7 +1091,7 @@ export function KeychainTool() {
                           />
                         </div>
                       ))}
-                      {settings.textLines.length < 3 ? (
+                      {textDraft.length < 3 ? (
                         <Button
                           size="sm"
                           variant="outline"
@@ -1078,6 +1102,18 @@ export function KeychainTool() {
                           Agregar línea
                         </Button>
                       ) : null}
+                      <Button
+                        size="sm"
+                        className="w-full"
+                        disabled={!textDraftDirty}
+                        onClick={applyTextDraft}
+                      >
+                        <Wand2 className="size-4" />
+                        {textDraftDirty ? "Generar con este texto" : "Texto aplicado"}
+                      </Button>
+                      <p className="text-[11px] text-muted-foreground">
+                        El modelo se genera al tocar el botón, no mientras escribís.
+                      </p>
                     </div>
 
                     <NumberSlider

@@ -1,5 +1,5 @@
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
-import { union } from "./clip2";
+import { unionSolid } from "./clip2";
 import type { Ring } from "./clip2";
 
 type Vec2 = [number, number];
@@ -26,7 +26,6 @@ const EMPTY_BOUNDS: DesignBounds = {
 
 const CURVE_DIVISIONS = 12;
 const POINT_EPSILON = 1e-3;
-const COLLINEAR_RATIO = 1e-3;
 const MAX_PATHS = 600;
 const MAX_CONTOURS = 6000;
 
@@ -34,19 +33,11 @@ function distance(a: Vec2, b: Vec2): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
-function isCollinear(prev: Vec2, current: Vec2, next: Vec2): boolean {
-  const area = Math.abs(
-    (current[0] - prev[0]) * (next[1] - current[1]) -
-      (current[1] - prev[1]) * (next[0] - current[0])
-  );
-  const base = distance(prev, current) + distance(current, next);
-  return area <= COLLINEAR_RATIO * Math.max(base, POINT_EPSILON);
-}
-
 /**
- * Los contornos que devuelve three incluyen puntos repetidos y vértices
- * colineales al subdividir las curvas. Se limpian antes de pasarlos a Clipper
- * para evitar lados de longitud cero.
+ * Los contornos que devuelve three incluyen puntos repetidos (lados de longitud
+ * cero) al subdividir las curvas. Se deduplican antes de pasarlos a Clipper.
+ * No se eliminan vértices colineales: hacerlo deformaba/corrompía contornos de
+ * fuentes reales (p. ej. la "N" de Calibri).
  */
 function cleanRing(ring: Vec2[]): Vec2[] {
   const deduped: Vec2[] = [];
@@ -61,18 +52,7 @@ function cleanRing(ring: Vec2[]): Vec2[] {
   ) {
     deduped.pop();
   }
-  if (deduped.length < 3) return deduped;
-
-  const total = deduped.length;
-  const result: Vec2[] = [];
-  for (let index = 0; index < total; index += 1) {
-    const prev = deduped[(index - 1 + total) % total];
-    const current = deduped[index];
-    const next = deduped[(index + 1) % total];
-    if (isCollinear(prev, current, next)) continue;
-    result.push(current);
-  }
-  return result;
+  return deduped;
 }
 
 /** SVG usa Y hacia abajo; se invierte para trabajar en un plano Y hacia arriba. */
@@ -102,41 +82,32 @@ export function svgToDesign(svgText: string): DesignGeometry {
   for (const path of data.paths.slice(0, MAX_PATHS)) {
     const style = path.userData?.style as { display?: string } | undefined;
     if (style?.display === "none") continue;
-    let shapes;
-    try {
-      shapes = path.toShapes();
-    } catch {
-      continue;
-    }
-    for (const shape of shapes) {
+    // Se recorren los subpaths crudos en vez de `toShapes()`: `toShapes`
+    // descarta o mal-clasifica contornos con ciertas fuentes (p. ej. Calibri),
+    // rellenando los contadores de las letras. Los subpaths traen TODOS los
+    // contornos y la unión por regla non-zero resuelve el anidamiento
+    // (exteriores + huecos), que es como se definen las fuentes.
+    const raw: Vec2[][] = [];
+    for (const subPath of path.subPaths) {
       let points;
       try {
-        points = shape.extractPoints(CURVE_DIVISIONS);
+        points = subPath.getPoints(CURVE_DIVISIONS);
       } catch {
         continue;
       }
-      const group: Vec2[][] = [];
-      const outerRing = toRing(points.shape);
-      if (outerRing.length >= 3) group.push(outerRing);
-      for (const hole of points.holes) {
-        const holeRing = toRing(hole);
-        if (holeRing.length >= 3) group.push(holeRing);
-      }
-      if (group.length === 0) continue;
-      // Se resuelve cada forma (contorno + sus huecos) por separado con la regla
-      // par-impar: así los agujeros se respetan sin importar cómo haya orientado
-      // three los contornos (las fuentes dependen de esto). Clipper normaliza la
-      // orientación (exterior antihorario, hueco horario) para la unión posterior.
-      let resolved: Vec2[][] = group;
-      if (group.length > 1) {
-        try {
-          resolved = union(group);
-        } catch {
-          resolved = group;
-        }
-      }
-      for (const ring of resolved) push(ring);
+      const ring = toRing(points);
+      if (ring.length >= 3) raw.push(ring);
     }
+    if (raw.length === 0) continue;
+    let resolved: Vec2[][] = raw;
+    if (raw.length > 1) {
+      try {
+        resolved = unionSolid(raw);
+      } catch {
+        resolved = raw;
+      }
+    }
+    for (const ring of resolved) push(ring);
   }
 
   if (contours.length === 0) {

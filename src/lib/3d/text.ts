@@ -1,4 +1,4 @@
-import { parse } from "opentype.js";
+import { parse, type OpenTypePath } from "opentype.js";
 import type { HandoffLayer } from "./handoff";
 
 export interface KeychainFont {
@@ -119,6 +119,59 @@ export function loadFont(id: string): Promise<OpenTypeFont> {
   return promise;
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error);
+}
+
+/**
+ * Muchas fuentes del sistema (sobre todo en Windows) vienen en colecciones
+ * TrueType (.ttc). opentype.js no las entiende, así que si el buffer es una
+ * colección se extrae la primera fuente como un sfnt independiente.
+ */
+function firstFontFromCollection(buffer: ArrayBuffer): ArrayBuffer {
+  if (buffer.byteLength < 12) return buffer;
+  const view = new DataView(buffer);
+  if (view.getUint32(0) !== 0x74746366) return buffer; // 'ttcf'
+  const numFonts = view.getUint32(8);
+  if (numFonts < 1) return buffer;
+  const dirOffset = view.getUint32(12);
+  if (dirOffset + 12 > buffer.byteLength) return buffer;
+  const numTables = view.getUint16(dirOffset + 4);
+  if (numTables === 0) return buffer;
+
+  const records: { offset: number; length: number }[] = [];
+  for (let i = 0; i < numTables; i += 1) {
+    const rec = dirOffset + 12 + i * 16;
+    if (rec + 16 > buffer.byteLength) return buffer;
+    records.push({
+      offset: view.getUint32(rec + 8),
+      length: view.getUint32(rec + 12),
+    });
+  }
+
+  const headerSize = 12 + numTables * 16;
+  const offsets: number[] = [];
+  let total = headerSize;
+  for (const record of records) {
+    offsets.push(total);
+    total += record.length;
+    if (total % 4 !== 0) total += 4 - (total % 4);
+  }
+
+  const out = new Uint8Array(total);
+  out.set(new Uint8Array(buffer, dirOffset, headerSize), 0);
+  const outView = new DataView(out.buffer);
+  for (let i = 0; i < numTables; i += 1) {
+    outView.setUint32(12 + i * 16 + 8, offsets[i]);
+    const src = records[i];
+    if (src.offset + src.length <= buffer.byteLength) {
+      out.set(new Uint8Array(buffer, src.offset, src.length), offsets[i]);
+    }
+  }
+  return out.buffer;
+}
+
 async function loadSystemFont(postscriptName: string): Promise<OpenTypeFont> {
   const font = localRegistry.get(postscriptName);
   if (!font) {
@@ -126,11 +179,21 @@ async function loadSystemFont(postscriptName: string): Promise<OpenTypeFont> {
       "Esa fuente del equipo ya no está disponible. Volvé a cargar las fuentes del sistema."
     );
   }
+  let buffer: ArrayBuffer;
   try {
     const blob = await font.blob();
-    return parse(await blob.arrayBuffer());
-  } catch {
-    throw new Error("No se pudo leer esa fuente del equipo (puede estar protegida).");
+    buffer = await blob.arrayBuffer();
+  } catch (error) {
+    throw new Error(
+      `No se pudo leer esa fuente del equipo (${errorMessage(error)}).`
+    );
+  }
+  try {
+    return parse(firstFontFromCollection(buffer));
+  } catch (error) {
+    throw new Error(
+      `Esa fuente del equipo no se pudo interpretar (${errorMessage(error)}).`
+    );
   }
 }
 
@@ -142,11 +205,43 @@ function lineToSvg(
   sizeMm: number,
   letterSpacingMm: number
 ): string {
-  // opentype aplica `letterSpacing` en em (lo multiplica por el tamaño de fuente).
-  const letterSpacing = sizeMm > 0 ? letterSpacingMm / sizeMm : 0;
-  const path = font.getPath(text, x, baseline, sizeMm, { letterSpacing });
-  const d = path.toPathData(3);
+  const d = buildLinePath(font, text, x, baseline, sizeMm, letterSpacingMm).path.toPathData(3);
   return `<svg xmlns="http://www.w3.org/2000/svg"><path d="${d}"/></svg>`;
+}
+
+/**
+ * Traza una línea con opentype. Si el shaping falla (algunas fuentes del equipo
+ * usan sustituciones GSUB que opentype.js no soporta y lanza), cae a un trazado
+ * glifo a glifo sin shaping para que el texto igual se genere.
+ */
+function buildLinePath(
+  font: OpenTypeFont,
+  text: string,
+  x: number,
+  baseline: number,
+  sizeMm: number,
+  letterSpacingMm: number
+): { path: OpenTypePath; advance: number } {
+  const letterSpacing = sizeMm > 0 ? letterSpacingMm / sizeMm : 0;
+  try {
+    return {
+      path: font.getPath(text, x, baseline, sizeMm, { letterSpacing }),
+      advance: font.getAdvanceWidth(text, sizeMm, { letterSpacing }),
+    };
+  } catch {
+    const scale = sizeMm / (font.unitsPerEm || 1000);
+    let cursor = x;
+    const parts = Array.from(text).map((char) => {
+      const glyph = font.charToGlyph(char);
+      const part = glyph.getPath(cursor, baseline, sizeMm);
+      cursor += (glyph.advanceWidth ?? 0) * scale + letterSpacingMm;
+      return part;
+    });
+    const path = parts[0];
+    if (!path) return { path: font.getPath("", x, baseline, sizeMm), advance: 0 };
+    for (let i = 1; i < parts.length; i += 1) path.extend(parts[i]);
+    return { path, advance: cursor - x };
+  }
 }
 
 /**
@@ -165,11 +260,8 @@ export function buildTextLayers(
   const spacing = Math.max(0, options.letterSpacingMm ?? 0);
 
   const measured = usable.map((line) => {
-    const path = font.getPath(line.text, 0, 0, line.sizeMm);
-    const bbox = path.getBoundingBox();
-    const letterSpacing = line.sizeMm > 0 ? spacing / line.sizeMm : 0;
-    const advance = font.getAdvanceWidth(line.text, line.sizeMm, { letterSpacing });
-    return { line, bbox, advance };
+    const { path, advance } = buildLinePath(font, line.text, 0, 0, line.sizeMm, spacing);
+    return { line, bbox: path.getBoundingBox(), advance };
   });
 
   const totalHeight =

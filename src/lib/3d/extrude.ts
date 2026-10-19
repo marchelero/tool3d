@@ -50,12 +50,12 @@ const pointKey = (x: number, y: number): string =>
 function emitCap(
   store: VertexStore,
   polygons: Poly3[],
-  region: Ring[],
+  vertices: [number, number][],
+  faces: [number, number, number][],
   z: number,
   flip: boolean
 ): BoundaryEdge[] {
-  if (region.length === 0) return [];
-  const { vertices, faces } = triangulateCdt(region);
+  if (faces.length === 0) return [];
   const directed = new Map<string, number>();
   const edges: { px: number; py: number; qx: number; qy: number; key: string }[] = [];
 
@@ -118,8 +118,12 @@ export function buildSolid(slabs: Slab[]): Geom3 {
   const polygons: Poly3[] = [];
 
   for (const slab of stack) {
-    emitCap(store, polygons, slab.region, slab.zBottom, true);
-    const boundaries = emitCap(store, polygons, slab.region, slab.zTop, false);
+    // Se triangula UNA vez por tramo y se reutilizan las mismas caras para la
+    // tapa inferior y la superior: así sus aristas de borde coinciden por
+    // construcción y las paredes cierran la caja sin dejar costuras.
+    const { vertices, faces } = triangulateCdt(slab.region);
+    emitCap(store, polygons, vertices, faces, slab.zBottom, true);
+    const boundaries = emitCap(store, polygons, vertices, faces, slab.zTop, false);
     for (const edge of boundaries) {
       const a = store.add(edge.qx, edge.qy, slab.zTop);
       const b = store.add(edge.px, edge.py, slab.zTop);
