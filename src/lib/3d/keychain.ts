@@ -32,7 +32,6 @@ export interface KeychainSettings {
   fillHoles: boolean;
   scalePercent: number;
   designRotation: number;
-  marginMm: number;
   bandLayers: number;
   silhouetteOffsetMm: number;
   ringEnabled: boolean;
@@ -67,7 +66,6 @@ export const DEFAULT_KEYCHAIN_SETTINGS: KeychainSettings = {
   fillHoles: false,
   scalePercent: 100,
   designRotation: 0,
-  marginMm: 4,
   bandLayers: 3,
   silhouetteOffsetMm: 3,
   ringEnabled: true,
@@ -86,6 +84,8 @@ export const DEFAULT_KEYCHAIN_SETTINGS: KeychainSettings = {
   textLetterSpacingMm: 0,
   textLineGapMm: 1,
 };
+
+const DESIGN_CLEARANCE_MM = 3;
 
 export interface KeychainPiece {
   name: string;
@@ -309,7 +309,7 @@ export function buildKeychain(
     const rotH = rawW * sinR + rawH * cosR;
 
     if (!silhouette) {
-      const margin = Math.max(0, settings.marginMm);
+      const margin = DESIGN_CLEARANCE_MM;
       const availW = baseBounds.maxX - baseBounds.minX - margin * 2;
       const ringBottom =
         holeRing && ringCenter ? ringCenter.y - holeR : baseBounds.maxY;
@@ -354,32 +354,56 @@ export function buildKeychain(
   }
 
   if (hasDesign && design.length > 0) {
-    placedPerLayer.forEach((placed, index) => {
-      const region = intersection(union(placed), clipRegion);
-      if (region.length === 0) return;
-      const color = designLayers[index].color;
-      let zBottom: number;
-      let zTop: number;
-      if (mode === "flat") {
-        zBottom = totalHeightMm - bandMm;
-        zTop = totalHeightMm;
-      } else if (mode === "engrave") {
-        zTop = totalHeightMm - layerHeight;
-        zBottom = Math.min(totalHeightMm - bandMm, zTop - layerHeight);
-      } else if (mode === "layered") {
-        zBottom = totalHeightMm + index * layerHeight;
-        zTop = zBottom + layerHeight;
-      } else {
-        zBottom = totalHeightMm;
-        zTop = totalHeightMm + bandMm;
+    const layerRegions: Ring[][] = placedPerLayer.map((placed) =>
+      intersection(union(placed), clipRegion)
+    );
+
+    if (mode === "layered") {
+      // Cada nivel se rellena con el color del nivel: la franja k cubre la
+      // unión de las zonas cuyo nivel es >= k, teñida con el color de la zona k.
+      const n = layerRegions.length;
+      for (let k = 0; k < n; k += 1) {
+        const parts: Ring[] = [];
+        for (let i = k; i < n; i += 1) parts.push(...layerRegions[i]);
+        if (parts.length === 0) continue;
+        const region = unionSolid(parts);
+        if (region.length === 0) continue;
+        const color = designLayers[k].color;
+        colorList.push(color);
+        colorPieces.push({
+          name: `Capa ${k + 1}`,
+          color: colorToRgba(color),
+          geometry: extrudeRegion(
+            region,
+            totalHeightMm + k * layerHeight,
+            layerHeight
+          ),
+        });
       }
-      colorList.push(color);
-      colorPieces.push({
-        name: `Color ${index + 1}`,
-        color: colorToRgba(color),
-        geometry: extrudeRegion(region, zBottom, zTop - zBottom),
+    } else {
+      layerRegions.forEach((region, index) => {
+        if (region.length === 0) return;
+        const color = designLayers[index].color;
+        let zBottom: number;
+        let zTop: number;
+        if (mode === "flat") {
+          zBottom = totalHeightMm - bandMm;
+          zTop = totalHeightMm;
+        } else if (mode === "engrave") {
+          zBottom = totalHeightMm - bandMm;
+          zTop = zBottom + layerHeight;
+        } else {
+          zBottom = totalHeightMm;
+          zTop = totalHeightMm + bandMm;
+        }
+        colorList.push(color);
+        colorPieces.push({
+          name: `Color ${index + 1}`,
+          color: colorToRgba(color),
+          geometry: extrudeRegion(region, zBottom, zTop - zBottom),
+        });
       });
-    });
+    }
   }
 
   // 7) Aro elevado (resalte alrededor del agujero) y borde sobre la base.

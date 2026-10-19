@@ -23,6 +23,7 @@ import {
   Diamond,
   Download,
   FileUp,
+  GripVertical,
   Heart,
   Hexagon,
   Image as ImageIcon,
@@ -131,7 +132,7 @@ const DESIGN_MODES: {
   {
     value: "engrave",
     label: "Grabado",
-    hint: "El diseño queda hundido una capa por debajo de la superficie.",
+    hint: "El diseño queda hundido todo el rebaje: el color va al fondo del hueco.",
   },
   {
     value: "raise",
@@ -250,14 +251,33 @@ export function KeychainTool() {
     [designKind, settings]
   );
 
+  const layerColors = useMemo(
+    () =>
+      designKind === "text"
+        ? settings.textLines.map((line) => line.color)
+        : imageLayers.map((layer) => layer.color),
+    [designKind, imageLayers, settings.textLines]
+  );
+
+  const [layerOrder, setLayerOrder] = useState<number[]>([]);
+  const orderedIndexes = useMemo(() => {
+    const count = layerColors.length;
+    const kept = layerOrder.filter((index) => index >= 0 && index < count);
+    const missing = Array.from({ length: count }, (_, i) => i).filter(
+      (index) => !kept.includes(index)
+    );
+    return [...kept, ...missing];
+  }, [layerColors.length, layerOrder]);
+
   const sourceName = useMemo(
     () => svgName ?? (handoff ? baseName(handoff.name) : "llavero"),
     [handoff, svgName]
   );
 
   const buildKey = useMemo(
-    () => `${JSON.stringify(resolvedSettings)}|${imageLayers.length}|${sourceName}`,
-    [imageLayers.length, resolvedSettings, sourceName]
+    () =>
+      `${JSON.stringify(resolvedSettings)}|${imageLayers.length}|${orderedIndexes.join(",")}|${sourceName}`,
+    [imageLayers.length, orderedIndexes, resolvedSettings, sourceName]
   );
 
   useEffect(() => {
@@ -276,6 +296,9 @@ export function KeychainTool() {
             });
           }
           if (cancelled) return;
+          layers = orderedIndexes
+            .map((index) => layers[index])
+            .filter((layer): layer is HandoffLayer => Boolean(layer));
           const generated = buildKeychain(resolvedSettings, layers);
           if (cancelled) return;
           setBuilt({
@@ -303,6 +326,7 @@ export function KeychainTool() {
     buildKey,
     designKind,
     imageLayers,
+    orderedIndexes,
     resolvedSettings,
     settings.fontId,
     settings.textLineGapMm,
@@ -399,7 +423,6 @@ export function KeychainTool() {
       starInnerRatio: DEFAULT_KEYCHAIN_SETTINGS.starInnerRatio,
       layers: DEFAULT_KEYCHAIN_SETTINGS.layers,
       layerHeightMm: DEFAULT_KEYCHAIN_SETTINGS.layerHeightMm,
-      marginMm: DEFAULT_KEYCHAIN_SETTINGS.marginMm,
       bandLayers: DEFAULT_KEYCHAIN_SETTINGS.bandLayers,
       scalePercent: DEFAULT_KEYCHAIN_SETTINGS.scalePercent,
       designRotation: DEFAULT_KEYCHAIN_SETTINGS.designRotation,
@@ -969,6 +992,21 @@ export function KeychainTool() {
                     />
                   </div>
                 ) : null}
+
+                {layerColors.length > 1 ? (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Orden de capas</Label>
+                    <p className="text-[11px] text-muted-foreground">
+                      Arrastrá para ordenar (aplica a &quot;Por capa-color&quot;).
+                      El primero va abajo; el último, arriba.
+                    </p>
+                    <LayerOrderList
+                      colors={layerColors}
+                      order={orderedIndexes}
+                      onReorder={setLayerOrder}
+                    />
+                  </div>
+                ) : null}
               </Panel>
 
               {showsDesign ? (
@@ -999,14 +1037,14 @@ export function KeychainTool() {
 
                   <NumberSlider
                     id="keychain-scale"
-                    label="Escala del diseño"
+                    label="Tamaño del diseño"
                     value={settings.scalePercent}
                     min={20}
                     max={300}
                     step={5}
                     unit="%"
                     decimals={0}
-                    hint="Podés pasar del 100%: lo que quede fuera del llavero se recorta."
+                    hint="100% = lo más grande que entra. Podés pasar del 100%: lo que quede fuera del llavero se recorta."
                     onChange={(value) => updateSettings({ scalePercent: value })}
                   />
 
@@ -1221,20 +1259,6 @@ export function KeychainTool() {
                     />
                   </div>
                 </div>
-
-                {showsDesign ? (
-                  <NumberSlider
-                    id="keychain-margin"
-                    label="Margen desde el borde"
-                    value={settings.marginMm}
-                    min={0}
-                    max={20}
-                    step={1}
-                    unit="mm"
-                    decimals={0}
-                    onChange={(value) => updateSettings({ marginMm: value })}
-                  />
-                ) : null}
               </Panel>
 
               <Panel
@@ -1603,6 +1627,63 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg border bg-muted/30 px-3 py-2">
       <p className="text-[11px] text-muted-foreground">{label}</p>
       <p className="text-sm font-medium tabular-nums">{value}</p>
+    </div>
+  );
+}
+
+function LayerOrderList({
+  colors,
+  order,
+  onReorder,
+}: {
+  colors: string[];
+  order: number[];
+  onReorder: (next: number[]) => void;
+}) {
+  const dragPos = useRef<number | null>(null);
+
+  const move = (from: number, to: number) => {
+    const next = order.slice();
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    onReorder(next);
+  };
+
+  return (
+    <div className="space-y-1">
+      {order.map((layerIndex, pos) => {
+        let hint = "";
+        if (pos === 0) hint = "abajo";
+        else if (pos === order.length - 1) hint = "arriba";
+        return (
+          <div
+            key={layerIndex}
+            draggable
+            onDragStart={() => {
+              dragPos.current = pos;
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (dragPos.current !== null && dragPos.current !== pos) {
+                move(dragPos.current, pos);
+              }
+              dragPos.current = null;
+            }}
+            className="flex cursor-grab items-center gap-2 rounded-md border bg-card px-2 py-1.5 active:cursor-grabbing"
+          >
+            <GripVertical className="size-3.5 shrink-0 text-muted-foreground" />
+            <span
+              className="size-4 shrink-0 rounded-sm border"
+              style={{ backgroundColor: colors[layerIndex] }}
+            />
+            <span className="text-[11px]">Nivel {pos + 1}</span>
+            <span className="ml-auto text-[10px] text-muted-foreground/70">
+              {hint}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
