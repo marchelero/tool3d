@@ -2,7 +2,7 @@ import { geometries, primitives } from "@jscad/modeling";
 import type { HandoffLayer } from "./handoff";
 import { buildMosaicSvg, type TileKind } from "./mosaic";
 import { patternToSvg, type PatternKind } from "./patterns";
-import { difference, intersection, union, type Ring } from "./clip2";
+import { difference, intersection, union, unionSolid, type Ring } from "./clip2";
 import { buildSolid, extrudeRegion, meshQuality, type Geom3, type Slab } from "./extrude";
 import { mergeBounds, svgToDesign, type DesignBounds } from "./svg";
 
@@ -408,7 +408,7 @@ export function buildCoaster(
       placedAll.push(...placed);
     }
 
-    const design = intersection(union(placedAll), clipRings);
+    const design = intersection(unionSolid(placedAll), clipRings);
     if (design.length === 0) return;
 
     if (through) {
@@ -487,7 +487,7 @@ export function buildCoaster(
     }
 
     designLayers.forEach((_, index) => {
-      const region = intersection(union(placedPerLayer[index]), clipRings);
+      const region = intersection(unionSolid(placedPerLayer[index]), clipRings);
       if (region.length === 0) return;
       const color = designLayers[index].color;
       colorList.push(color);

@@ -964,7 +964,7 @@ export function ImageTool() {
     [allLayers, excludedColors]
   );
 
-  const handleSendToPosavasos = useCallback(() => {
+  const handleSendToModule = useCallback(() => {
     if (!workCanvas || visibleLayers.length === 0) return;
     const saved = writePosavasosHandoff({
       name: fileName,
@@ -974,7 +974,7 @@ export function ImageTool() {
       savedAt: Date.now(),
     });
     if (!saved) {
-      toast.error("No se pudo preparar el diseño para posavasos");
+      toast.error("No se pudo preparar el diseño para el módulo");
     }
   }, [fileName, visibleLayers, workCanvas]);
 
@@ -2285,7 +2285,7 @@ export function ImageTool() {
                   variant="outline"
                   className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
                 >
-                  <Link href="/tools/posavasos" onClick={handleSendToPosavasos}>
+                  <Link href="/tools/posavasos" onClick={handleSendToModule}>
                     <Coffee className="size-5 shrink-0 text-primary" />
                     <span className="flex flex-1 flex-col">
                       <span className="text-sm font-medium">
@@ -2304,7 +2304,7 @@ export function ImageTool() {
                   variant="outline"
                   className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
                 >
-                  <Link href="/tools/llavero">
+                  <Link href="/tools/llavero" onClick={handleSendToModule}>
                     <KeyRound className="size-5 shrink-0 text-primary" />
                     <span className="flex flex-1 flex-col">
                       <span className="text-sm font-medium">

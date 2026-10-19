@@ -9,9 +9,70 @@ export interface KeychainFont {
 
 export const KEYCHAIN_FONTS: KeychainFont[] = [
   { id: "lato-black", label: "Lato (gruesa)", file: "/fonts/lato-black.ttf" },
-  { id: "baloo2", label: "Baloo (redondeada)", file: "/fonts/baloo2.ttf" },
+  { id: "poppins-bold", label: "Poppins (moderna)", file: "/fonts/poppins-bold.ttf" },
+  { id: "varelaround", label: "Varela Round (redondeada)", file: "/fonts/varelaround.ttf" },
+  { id: "anton", label: "Anton (impacto)", file: "/fonts/anton.ttf" },
+  { id: "bebas", label: "Bebas Neue (alta)", file: "/fonts/bebas.ttf" },
   { id: "bungee", label: "Bungee (bloque)", file: "/fonts/bungee.ttf" },
+  { id: "righteous", label: "Righteous (retro)", file: "/fonts/righteous.ttf" },
+  { id: "alfaslab", label: "Alfa Slab (serif)", file: "/fonts/alfaslab.ttf" },
+  { id: "lobster", label: "Lobster (cursiva)", file: "/fonts/lobster.ttf" },
+  { id: "pacifico", label: "Pacifico (caligráfica)", file: "/fonts/pacifico.ttf" },
 ];
+
+/** Prefijo de los ids que representan una fuente del sistema (Local Font Access API). */
+export const LOCAL_FONT_PREFIX = "local:";
+
+export interface SystemFont {
+  id: string;
+  label: string;
+}
+
+const localRegistry = new Map<string, LocalFontData>();
+
+/** ¿El navegador soporta leer las fuentes del equipo? (Chrome/Edge). */
+export function systemFontsSupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.queryLocalFonts === "function"
+  );
+}
+
+/**
+ * Estado del permiso de fuentes locales. Si ya está concedido, se pueden listar
+ * sin volver a preguntar (y sin necesidad de un clic).
+ */
+export async function systemFontsPermission(): Promise<
+  PermissionState | "unsupported"
+> {
+  if (typeof navigator === "undefined" || !navigator.permissions?.query) {
+    return "unsupported";
+  }
+  try {
+    const status = await navigator.permissions.query({
+      name: "local-fonts" as PermissionName,
+    });
+    return status.state;
+  } catch {
+    return "unsupported";
+  }
+}
+
+/** Pide permiso y lista las fuentes instaladas en el equipo. */
+export async function loadSystemFonts(): Promise<SystemFont[]> {
+  if (!systemFontsSupported()) {
+    throw new Error("Este navegador no permite leer las fuentes del equipo.");
+  }
+  const fonts = await window.queryLocalFonts!();
+  localRegistry.clear();
+  const list: SystemFont[] = [];
+  for (const font of fonts) {
+    localRegistry.set(font.postscriptName, font);
+    list.push({ id: LOCAL_FONT_PREFIX + font.postscriptName, label: font.fullName });
+  }
+  list.sort((a, b) => a.label.localeCompare(b.label));
+  return list;
+}
 
 export type OpenTypeFont = ReturnType<typeof parse>;
 
@@ -43,14 +104,34 @@ export function fontFile(id: string): string {
 export function loadFont(id: string): Promise<OpenTypeFont> {
   const existing = cache.get(id);
   if (existing) return existing;
-  const promise = fetch(fontFile(id))
-    .then((response) => {
-      if (!response.ok) throw new Error(`No se pudo cargar la fuente (${response.status})`);
-      return response.arrayBuffer();
-    })
-    .then((buffer) => parse(buffer));
+  const promise = id.startsWith(LOCAL_FONT_PREFIX)
+    ? loadSystemFont(id.slice(LOCAL_FONT_PREFIX.length))
+    : fetch(fontFile(id))
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`No se pudo cargar la fuente (${response.status})`);
+          }
+          return response.arrayBuffer();
+        })
+        .then((buffer) => parse(buffer));
   cache.set(id, promise);
+  promise.catch(() => cache.delete(id));
   return promise;
+}
+
+async function loadSystemFont(postscriptName: string): Promise<OpenTypeFont> {
+  const font = localRegistry.get(postscriptName);
+  if (!font) {
+    throw new Error(
+      "Esa fuente del equipo ya no está disponible. Volvé a cargar las fuentes del sistema."
+    );
+  }
+  try {
+    const blob = await font.blob();
+    return parse(await blob.arrayBuffer());
+  } catch {
+    throw new Error("No se pudo leer esa fuente del equipo (puede estar protegida).");
+  }
 }
 
 function lineToSvg(

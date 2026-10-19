@@ -27,6 +27,7 @@ import {
   Heart,
   Hexagon,
   Image as ImageIcon,
+  Layers,
   Loader2,
   Move,
   Octagon,
@@ -53,6 +54,15 @@ import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   DEFAULT_KEYCHAIN_SETTINGS,
   buildKeychain,
   type KeychainDesignKind,
@@ -62,7 +72,16 @@ import {
   type KeychainTextLine,
 } from "@/lib/3d/keychain";
 import { SHAPE_LABELS, type KeychainShape } from "@/lib/3d/shapes";
-import { KEYCHAIN_FONTS, buildTextLayers, loadFont } from "@/lib/3d/text";
+import {
+  KEYCHAIN_FONTS,
+  LOCAL_FONT_PREFIX,
+  buildTextLayers,
+  loadFont,
+  loadSystemFonts,
+  systemFontsPermission,
+  systemFontsSupported,
+  type SystemFont,
+} from "@/lib/3d/text";
 import {
   export3mf,
   exportStl,
@@ -84,9 +103,18 @@ const DESCRIPTION =
 
 const BUILD_DELAY = 200;
 
-const PANEL_IDS = ["shape", "ring", "border", "design", "placement"] as const;
+const PANEL_IDS = [
+  "shape",
+  "layers",
+  "design",
+  "image",
+  "text",
+  "placement",
+  "ring",
+  "border",
+] as const;
 
-type PanelTab = "base" | "design";
+type PanelTab = "forma" | "design" | "finish";
 
 interface BuiltModel {
   key: string;
@@ -185,6 +213,8 @@ function layersFromSvg(svgText: string): HandoffLayer[] {
   }));
 }
 
+const subscribeNoop = () => () => {};
+
 export function KeychainTool() {
   const rawHandoff = useSyncExternalStore(
     subscribeHandoff,
@@ -199,10 +229,20 @@ export function KeychainTool() {
   const [settings, setSettings] = useState<KeychainSettings>(
     DEFAULT_KEYCHAIN_SETTINGS
   );
+  const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
+  const [loadingSystemFonts, setLoadingSystemFonts] = useState(false);
+  const [systemFontError, setSystemFontError] = useState<string | null>(null);
+  const [systemFontId, setSystemFontId] = useState<string | null>(null);
+  const localFontsAvailable = useSyncExternalStore(
+    subscribeNoop,
+    () => systemFontsSupported(),
+    () => false
+  );
+  const activeFontId = systemFontId ?? settings.fontId;
   const [built, setBuilt] = useState<BuiltModel | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [exporting, setExporting] = useState<"stl" | "3mf" | null>(null);
-  const [panel, setPanel] = useState<PanelTab>("base");
+  const [panel, setPanel] = useState<PanelTab>("forma");
   const [expanded, setExpanded] = useState(false);
   const [ringDragActive, setRingDragActive] = useState(false);
   const [openPanels, setOpenPanels] = useState<Record<string, boolean>>(() =>
@@ -222,6 +262,50 @@ export function KeychainTool() {
       return Object.fromEntries(PANEL_IDS.map((id) => [id, !everyOpen]));
     });
   }, []);
+
+  const handleLoadSystemFonts = async () => {
+    setLoadingSystemFonts(true);
+    setSystemFontError(null);
+    try {
+      const fonts = await loadSystemFonts();
+      setSystemFonts(fonts);
+    } catch (error) {
+      setSystemFontError(
+        error instanceof Error
+          ? error.message
+          : "No se pudieron cargar las fuentes del equipo."
+      );
+    } finally {
+      setLoadingSystemFonts(false);
+    }
+  };
+
+  const handleFontChange = (value: string) => {
+    if (value.startsWith(LOCAL_FONT_PREFIX)) {
+      setSystemFontId(value);
+    } else {
+      setSystemFontId(null);
+      setSettings((current) => ({ ...current, fontId: value }));
+    }
+  };
+
+  useEffect(() => {
+    if (!localFontsAvailable) return;
+    let cancelled = false;
+    void (async () => {
+      const state = await systemFontsPermission();
+      if (cancelled || state !== "granted") return;
+      try {
+        const fonts = await loadSystemFonts();
+        if (!cancelled) setSystemFonts(fonts);
+      } catch {
+        // Silencioso: se pueden cargar a mano con el botón.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [localFontsAvailable]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -247,8 +331,8 @@ export function KeychainTool() {
       : settings.designKind;
 
   const resolvedSettings = useMemo<KeychainSettings>(
-    () => ({ ...settings, designKind }),
-    [designKind, settings]
+    () => ({ ...settings, designKind, fontId: activeFontId }),
+    [activeFontId, designKind, settings]
   );
 
   const layerColors = useMemo(
@@ -289,7 +373,7 @@ export function KeychainTool() {
           if (designKind === "image") {
             layers = imageLayers;
           } else if (designKind === "text") {
-            const font = await loadFont(settings.fontId);
+            const font = await loadFont(resolvedSettings.fontId);
             layers = buildTextLayers(font, settings.textLines, {
               letterSpacingMm: settings.textLetterSpacingMm,
               lineGapMm: settings.textLineGapMm,
@@ -328,7 +412,6 @@ export function KeychainTool() {
     imageLayers,
     orderedIndexes,
     resolvedSettings,
-    settings.fontId,
     settings.textLineGapMm,
     settings.textLines,
     settings.textLetterSpacingMm,
@@ -708,10 +791,11 @@ export function KeychainTool() {
                   : "sticky -top-1 z-10 -mx-1 flex items-center gap-2 bg-background/95 px-1 py-2 backdrop-blur"
               }
             >
-              <TabsList className="grid h-9 flex-1 grid-cols-2">
-                <TabsTrigger value="base">Base</TabsTrigger>
-                <TabsTrigger value="design">Diseño</TabsTrigger>
-              </TabsList>
+                <TabsList className="grid h-9 flex-1 grid-cols-3">
+                  <TabsTrigger value="forma">Forma</TabsTrigger>
+                  <TabsTrigger value="design">Diseño</TabsTrigger>
+                  <TabsTrigger value="finish">Acabado</TabsTrigger>
+                </TabsList>
               <Button
                 size="icon-sm"
                 variant="outline"
@@ -732,50 +816,15 @@ export function KeychainTool() {
             </div>
 
             <TabsContent value="design" className="space-y-2">
-              {showsDesign ? (
-                <div className="space-y-2.5 rounded-xl border bg-card p-3">
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Palette className="size-3.5" />
-                    </span>
-                    <span className="flex-1 text-sm font-medium">Estilo</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {
-                        DESIGN_MODES.find(
-                          (mode) => mode.value === settings.designMode
-                        )?.label
-                      }
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {DESIGN_MODES.map((mode) => (
-                      <Button
-                        key={mode.value}
-                        size="sm"
-                        variant={
-                          settings.designMode === mode.value
-                            ? "default"
-                            : "outline"
-                        }
-                        aria-pressed={settings.designMode === mode.value}
-                        onClick={() => updateSettings({ designMode: mode.value })}
-                      >
-                        {mode.label}
-                      </Button>
-                    ))}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {DESIGN_MODES.find(
-                      (mode) => mode.value === settings.designMode
-                    )?.hint}
-                  </p>
-                </div>
-              ) : null}
+              <TabHint>
+                Sumá una imagen o hasta 3 líneas de texto, elegí cómo se ve y
+                ajustá su tamaño.
+              </TabHint>
 
               <Panel
                 id="design"
                 icon={Type}
-                title="Diseño"
+                title="Contenido"
                 summary={
                   showsImage && imageLayers.length > 0
                     ? `${imageLayers.length} color(es)`
@@ -808,30 +857,21 @@ export function KeychainTool() {
                     );
                   })}
                 </div>
+              </Panel>
 
-                {showsDesign ? (
-                  <div className="space-y-1.5">
-                    <Button
-                      size="sm"
-                      variant={settings.fillHoles ? "default" : "outline"}
-                      aria-pressed={settings.fillHoles}
-                      className="w-full"
-                      onClick={() =>
-                        updateSettings({ fillHoles: !settings.fillHoles })
-                      }
-                    >
-                      {settings.fillHoles
-                        ? "Huecos rellenados"
-                        : "Mantener huecos"}
-                    </Button>
-                    <p className="text-[11px] text-muted-foreground">
-                      Rellena los huecos internos del diseño (útil en letras o
-                      formas finas).
-                    </p>
-                  </div>
-                ) : null}
-
-                {showsImage ? (
+              {showsImage ? (
+                <Panel
+                  id="image"
+                  icon={ImageIcon}
+                  title="Imagen"
+                  summary={
+                    imageLayers.length > 0
+                      ? `${imageLayers.length} color(es)`
+                      : "sin archivo"
+                  }
+                  open={openPanels.image}
+                  onToggle={togglePanel}
+                >
                   <div className="space-y-2">
                     <input
                       ref={fileInputRef}
@@ -879,28 +919,102 @@ export function KeychainTool() {
                       </p>
                     )}
                   </div>
-                ) : null}
+                  <div className="space-y-1.5 border-t border-border/60 pt-3">
+                    <Button
+                      size="sm"
+                      variant={settings.fillHoles ? "default" : "outline"}
+                      aria-pressed={settings.fillHoles}
+                      className="w-full"
+                      onClick={() =>
+                        updateSettings({ fillHoles: !settings.fillHoles })
+                      }
+                    >
+                      {settings.fillHoles
+                        ? "Huecos rellenados"
+                        : "Mantener huecos"}
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground">
+                      Rellena los huecos internos del diseño (útil en formas
+                      finas).
+                    </p>
+                  </div>
+                </Panel>
+              ) : null}
 
-                {showsText ? (
+              {showsText ? (
+                <Panel
+                  id="text"
+                  icon={Type}
+                  title="Texto"
+                  summary={`${settings.textLines.length} línea(s)`}
+                  open={openPanels.text}
+                  onToggle={togglePanel}
+                >
                   <div className="space-y-3">
                     <div className="space-y-1.5">
                       <Label className="text-xs">Fuente</Label>
-                      <div className="grid grid-cols-3 gap-1.5">
-                        {KEYCHAIN_FONTS.map((font) => (
+                      <Select
+                        value={activeFontId}
+                        onValueChange={handleFontChange}
+                      >
+                        <SelectTrigger size="sm" className="w-full">
+                          <SelectValue placeholder="Elegí una fuente" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectLabel>Incluidas</SelectLabel>
+                            {KEYCHAIN_FONTS.map((font) => (
+                              <SelectItem key={font.id} value={font.id}>
+                                {font.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                          {systemFonts.length > 0 ? (
+                            <SelectGroup>
+                              <SelectLabel>Del equipo</SelectLabel>
+                              {systemFonts.map((font) => (
+                                <SelectItem key={font.id} value={font.id}>
+                                  {font.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          ) : null}
+                        </SelectContent>
+                      </Select>
+                      {localFontsAvailable ? (
+                        <div className="flex flex-wrap items-center gap-2">
                           <Button
-                            key={font.id}
+                            type="button"
                             size="sm"
-                            variant={
-                              settings.fontId === font.id ? "default" : "outline"
-                            }
-                            aria-pressed={settings.fontId === font.id}
-                            className="px-1 text-[11px]"
-                            onClick={() => updateSettings({ fontId: font.id })}
+                            variant="outline"
+                            className="h-7 px-2 text-[11px]"
+                            disabled={loadingSystemFonts}
+                            onClick={handleLoadSystemFonts}
                           >
-                            {font.label}
+                            {loadingSystemFonts ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : null}
+                            {systemFonts.length > 0
+                              ? `Recargar fuentes (${systemFonts.length})`
+                              : "Buscar fuentes del equipo"}
                           </Button>
-                        ))}
-                      </div>
+                          {systemFonts.length > 0 ? (
+                            <span className="text-[11px] text-muted-foreground">
+                              Elegí una de &quot;Del equipo&quot; arriba
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground">
+                          Tu navegador no permite leer las fuentes del equipo
+                          (probá Chrome o Edge).
+                        </p>
+                      )}
+                      {systemFontError ? (
+                        <p className="text-[11px] text-destructive">
+                          {systemFontError}
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="space-y-2">
@@ -991,29 +1105,87 @@ export function KeychainTool() {
                       }
                     />
                   </div>
-                ) : null}
-
-                {layerColors.length > 1 ? (
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Orden de capas</Label>
+                  <div className="space-y-1.5 border-t border-border/60 pt-3">
+                    <Button
+                      size="sm"
+                      variant={settings.fillHoles ? "default" : "outline"}
+                      aria-pressed={settings.fillHoles}
+                      className="w-full"
+                      onClick={() =>
+                        updateSettings({ fillHoles: !settings.fillHoles })
+                      }
+                    >
+                      {settings.fillHoles
+                        ? "Huecos rellenados"
+                        : "Mantener huecos"}
+                    </Button>
                     <p className="text-[11px] text-muted-foreground">
-                      Arrastrá para ordenar (aplica a &quot;Por capa-color&quot;).
-                      El primero va abajo; el último, arriba.
+                      Rellena los huecos de las letras (por ejemplo o, a, e).
                     </p>
-                    <LayerOrderList
-                      colors={layerColors}
-                      order={orderedIndexes}
-                      onReorder={setLayerOrder}
-                    />
                   </div>
-                ) : null}
-              </Panel>
+                </Panel>
+              ) : null}
+
+              {showsDesign ? (
+                <div className="space-y-2.5 rounded-xl border bg-card p-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Palette className="size-3.5" />
+                    </span>
+                    <span className="flex-1 text-sm font-medium">Estilo</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {
+                        DESIGN_MODES.find(
+                          (mode) => mode.value === settings.designMode
+                        )?.label
+                      }
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {DESIGN_MODES.map((mode) => (
+                      <Button
+                        key={mode.value}
+                        size="sm"
+                        variant={
+                          settings.designMode === mode.value
+                            ? "default"
+                            : "outline"
+                        }
+                        aria-pressed={settings.designMode === mode.value}
+                        onClick={() => updateSettings({ designMode: mode.value })}
+                      >
+                        {mode.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {DESIGN_MODES.find(
+                      (mode) => mode.value === settings.designMode
+                    )?.hint}
+                  </p>
+                  {layerColors.length > 1 &&
+                  settings.designMode === "layered" ? (
+                    <div className="space-y-1.5 border-t border-border/60 pt-2.5">
+                      <Label className="text-xs">Orden de capas</Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        Arrastrá para ordenar. El primero va abajo; el último,
+                        arriba.
+                      </p>
+                      <LayerOrderList
+                        colors={layerColors}
+                        order={orderedIndexes}
+                        onReorder={setLayerOrder}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               {showsDesign ? (
                 <Panel
                   id="placement"
                   icon={Scaling}
-                  title="Posición y escala"
+                  title="Tamaño y posición"
                   summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
                   open={openPanels.placement}
                   onToggle={togglePanel}
@@ -1066,11 +1238,15 @@ export function KeychainTool() {
               ) : null}
             </TabsContent>
 
-            <TabsContent value="base" className="space-y-2">
+            <TabsContent value="forma" className="space-y-2">
+              <TabHint>
+                Elegí la forma, el tamaño y la altura del llavero.
+              </TabHint>
+
               <Panel
                 id="shape"
                 icon={Shapes}
-                title="Forma y medidas"
+                title="Forma y tamaño"
                 summary={`${SHAPE_LABELS[settings.shape]} · ${settings.widthMm.toFixed(0)} mm · ${settings.layers} capas`}
                 open={openPanels.shape}
                 onToggle={togglePanel}
@@ -1216,6 +1392,18 @@ export function KeychainTool() {
                   />
                 ) : null}
 
+              </Panel>
+
+              <Panel
+                id="layers"
+                icon={Layers}
+                title="Altura y capas"
+                summary={`${settings.layers} capas · ${(
+                  settings.layers * settings.layerHeightMm
+                ).toFixed(2)} mm`}
+                open={openPanels.layers}
+                onToggle={togglePanel}
+              >
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1.5">
                     <Label htmlFor="keychain-layers" className="text-xs">
@@ -1259,7 +1447,17 @@ export function KeychainTool() {
                     />
                   </div>
                 </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Más capas = más detalle en el relieve. La altura de capa define
+                  el salto de cada nivel.
+                </p>
               </Panel>
+            </TabsContent>
+
+            <TabsContent value="finish" className="space-y-2">
+              <TabHint>
+                Ajustá la anilla, el color de la base y el borde elevado.
+              </TabHint>
 
               <Panel
                 id="ring"
@@ -1628,6 +1826,14 @@ function Stat({ label, value }: { label: string; value: string }) {
       <p className="text-[11px] text-muted-foreground">{label}</p>
       <p className="text-sm font-medium tabular-nums">{value}</p>
     </div>
+  );
+}
+
+function TabHint({ children }: { children: ReactNode }) {
+  return (
+    <p className="px-0.5 text-[11px] leading-relaxed text-muted-foreground">
+      {children}
+    </p>
   );
 }
 

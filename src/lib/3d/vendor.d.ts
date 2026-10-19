@@ -104,3 +104,16 @@ declare module "cdt2d" {
 
   export default cdt2d;
 }
+
+interface LocalFontData {
+  readonly family: string;
+  readonly fullName: string;
+  readonly postscriptName: string;
+  readonly style: string;
+  blob(): Promise<Blob>;
+}
+
+interface Window {
+  /** Local Font Access API (Chrome/Edge). */
+  queryLocalFonts?: () => Promise<LocalFontData[]>;
+}

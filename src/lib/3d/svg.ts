@@ -1,4 +1,5 @@
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
+import { union } from "./clip2";
 import type { Ring } from "./clip2";
 
 type Vec2 = [number, number];
@@ -114,8 +115,27 @@ export function svgToDesign(svgText: string): DesignGeometry {
       } catch {
         continue;
       }
-      push(toRing(points.shape));
-      for (const hole of points.holes) push(toRing(hole));
+      const group: Vec2[][] = [];
+      const outerRing = toRing(points.shape);
+      if (outerRing.length >= 3) group.push(outerRing);
+      for (const hole of points.holes) {
+        const holeRing = toRing(hole);
+        if (holeRing.length >= 3) group.push(holeRing);
+      }
+      if (group.length === 0) continue;
+      // Se resuelve cada forma (contorno + sus huecos) por separado con la regla
+      // par-impar: así los agujeros se respetan sin importar cómo haya orientado
+      // three los contornos (las fuentes dependen de esto). Clipper normaliza la
+      // orientación (exterior antihorario, hueco horario) para la unión posterior.
+      let resolved: Vec2[][] = group;
+      if (group.length > 1) {
+        try {
+          resolved = union(group);
+        } catch {
+          resolved = group;
+        }
+      }
+      for (const ring of resolved) push(ring);
     }
   }
 

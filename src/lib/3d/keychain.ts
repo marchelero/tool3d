@@ -1,5 +1,5 @@
 import type { HandoffLayer } from "./handoff";
-import { difference, intersection, offset, union, unionSolid, type Ring } from "./clip2";
+import { difference, intersection, offset, unionSolid, type Ring } from "./clip2";
 import { buildSolid, extrudeRegion, meshQuality, type Geom3, type Slab } from "./extrude";
 import { mergeBounds, svgToDesign, type DesignBounds } from "./svg";
 import { buildShapeRings, type KeychainShape } from "./shapes";
@@ -241,7 +241,7 @@ export function buildKeychain(
     const placed = designLayers.flatMap((layer) =>
       transformRings(layer.contours, scale, offsetX, offsetY, rotation)
     );
-    baseRings = offset(union(placed), Math.max(0.5, settings.silhouetteOffsetMm), "round");
+    baseRings = offset(unionSolid(placed), Math.max(0.5, settings.silhouetteOffsetMm), "round");
   } else {
     baseRings = buildShapeRings(silhouette ? "round" : settings.shape, shapeParams);
   }
@@ -330,7 +330,7 @@ export function buildKeychain(
       placedPerLayer.push(placed);
       placedAll.push(...placed);
     }
-    design = intersection(union(placedAll), clipRegion);
+    design = intersection(unionSolid(placedAll), clipRegion);
     designWidthMm = Math.min(rotW * scale, baseBounds.maxX - baseBounds.minX);
     designHeightMm = Math.min(rotH * scale, baseBounds.maxY - baseBounds.minY);
   }
@@ -355,7 +355,7 @@ export function buildKeychain(
 
   if (hasDesign && design.length > 0) {
     const layerRegions: Ring[][] = placedPerLayer.map((placed) =>
-      intersection(union(placed), clipRegion)
+      intersection(unionSolid(placed), clipRegion)
     );
 
     if (mode === "layered") {
