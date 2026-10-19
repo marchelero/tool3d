@@ -16,20 +16,35 @@ import {
 } from "lucide-react";
 import {
   Box3,
+  BufferGeometry,
   DirectionalLight,
   DoubleSide,
   GridHelper,
   Group,
   HemisphereLight,
+  LineBasicMaterial,
+  LineLoop,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
+  Plane,
+  Raycaster,
   Scene,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { MeshPiece } from "@/lib/3d/mesh";
+
+export interface RingDrag {
+  active: boolean;
+  x: number;
+  y: number;
+  radius: number;
+  wall: number;
+  onCommit: (x: number, y: number) => void;
+}
 
 interface ModelViewerProps {
   meshes: MeshPiece[];
@@ -38,6 +53,7 @@ interface ModelViewerProps {
   designMm?: number;
   expanded?: boolean;
   onToggleExpanded?: () => void;
+  ringDrag?: RingDrag;
   className?: string;
 }
 
@@ -53,9 +69,18 @@ export function ModelViewer({
   designMm = 0,
   expanded = false,
   onToggleExpanded,
+  ringDrag,
   className,
 }: ModelViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const ringDragRef = useRef<RingDrag | undefined>(ringDrag);
+  const ghostRef = useRef<Group | null>(null);
+  const ghostOuterRef = useRef<LineLoop | null>(null);
+  const ghostInnerRef = useRef<LineLoop | null>(null);
+  const ghostPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const committedRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const pressedRef = useRef(false);
+  const topZRef = useRef(0);
   const sceneRef = useRef<Scene | null>(null);
   const cameraRef = useRef<PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
@@ -112,6 +137,81 @@ export function ModelViewer({
     controls.autoRotateSpeed = 1.6;
     controls.target.set(0, 0, 0);
 
+    const raycaster = new Raycaster();
+    const dragPlane = new Plane(new Vector3(0, 0, 1), 0);
+    const ndc = new Vector2();
+    const hitPoint = new Vector3();
+    const hitOnPlane = (event: PointerEvent): Vector3 | null => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      ndc.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycaster.setFromCamera(ndc, camera);
+      dragPlane.constant = -topZRef.current;
+      const point = raycaster.ray.intersectPlane(dragPlane, hitPoint);
+      return point ? hitPoint.clone() : null;
+    };
+
+    const circleGeometry = (segments = 72): BufferGeometry => {
+      const points: Vector3[] = [];
+      for (let index = 0; index < segments; index += 1) {
+        const angle = (2 * Math.PI * index) / segments;
+        points.push(new Vector3(Math.cos(angle), Math.sin(angle), 0));
+      }
+      return new BufferGeometry().setFromPoints(points);
+    };
+    const ghostMaterial = new LineBasicMaterial({
+      color: 0x2563eb,
+      depthTest: false,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const ghost = new Group();
+    const ghostOuter = new LineLoop(circleGeometry(), ghostMaterial);
+    const ghostInner = new LineLoop(circleGeometry(), ghostMaterial);
+    ghostOuter.renderOrder = 999;
+    ghostInner.renderOrder = 999;
+    ghost.add(ghostOuter, ghostInner);
+    ghost.visible = false;
+    scene.add(ghost);
+    ghostRef.current = ghost;
+    ghostOuterRef.current = ghostOuter;
+    ghostInnerRef.current = ghostInner;
+
+    const placeGhost = (x: number, y: number) => {
+      ghostPosRef.current = { x, y };
+      ghost.position.set(x, y, topZRef.current + 0.4);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!ringDragRef.current?.active) return;
+      const hit = hitOnPlane(event);
+      if (hit) placeGhost(hit.x, hit.y);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!ringDragRef.current?.active) return;
+      const hit = hitOnPlane(event);
+      if (hit) placeGhost(hit.x, hit.y);
+      pressedRef.current = true;
+      event.preventDefault();
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (!pressedRef.current) return;
+      pressedRef.current = false;
+      const drag = ringDragRef.current;
+      if (drag?.active) {
+        drag.onCommit(ghostPosRef.current.x, ghostPosRef.current.y);
+      }
+      if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+        renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+    };
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
+    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("pointercancel", onPointerUp);
+
     const grid = new GridHelper(600, 60, 0x94a3b8, 0xcbd5e1);
     grid.rotation.x = Math.PI / 2;
     grid.position.z = -0.4;
@@ -135,6 +235,7 @@ export function ModelViewer({
     gridRef.current = grid;
 
     const render = () => {
+      if (ghost.visible) ghost.position.z = topZRef.current + 0.4;
       controls.update();
       renderer.render(scene, camera);
     };
@@ -156,6 +257,17 @@ export function ModelViewer({
     return () => {
       observer.disconnect();
       renderer.setAnimationLoop(null);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointercancel", onPointerUp);
+      scene.remove(ghost);
+      ghostOuter.geometry.dispose();
+      ghostInner.geometry.dispose();
+      ghostMaterial.dispose();
+      ghostRef.current = null;
+      ghostOuterRef.current = null;
+      ghostInnerRef.current = null;
       controls.dispose();
       for (const child of [...model.children]) {
         model.remove(child);
@@ -190,6 +302,32 @@ export function ModelViewer({
     const controls = controlsRef.current;
     if (controls) controls.autoRotate = autoRotate;
   }, [autoRotate]);
+
+  useEffect(() => {
+    ringDragRef.current = ringDrag;
+    const controls = controlsRef.current;
+    if (controls) controls.enabled = !ringDrag?.active;
+    const ghost = ghostRef.current;
+    const outer = ghostOuterRef.current;
+    const inner = ghostInnerRef.current;
+    if (ghost && outer && inner) {
+      ghost.visible = Boolean(ringDrag?.active);
+      if (ringDrag) {
+        outer.scale.setScalar(Math.max(0.2, ringDrag.radius + ringDrag.wall));
+        inner.scale.setScalar(Math.max(0.2, ringDrag.radius));
+        if (
+          committedRef.current.x !== ringDrag.x ||
+          committedRef.current.y !== ringDrag.y
+        ) {
+          committedRef.current = { x: ringDrag.x, y: ringDrag.y };
+          ghostPosRef.current = { x: ringDrag.x, y: ringDrag.y };
+          ghost.position.set(ringDrag.x, ringDrag.y, topZRef.current + 0.4);
+        }
+      }
+    }
+    const container = containerRef.current;
+    if (container) container.style.cursor = ringDrag?.active ? "crosshair" : "";
+  }, [ringDrag]);
 
   useEffect(() => {
     wireframeRef.current = wireframe;
@@ -271,6 +409,7 @@ export function ModelViewer({
     const box = new Box3().setFromObject(model);
     const size = box.getSize(new Vector3());
     const center = box.getCenter(new Vector3());
+    topZRef.current = box.max.z;
     const maxDim = Math.max(size.x, size.y, size.z, 1);
     const fov = (camera.fov * Math.PI) / 180;
     const distance = (maxDim / 2 / Math.tan(fov / 2)) * 2.2;
@@ -362,7 +501,9 @@ export function ModelViewer({
         {designMm > 0 ? ` · Diseño ${Math.round(designMm * 10) / 10} mm` : ""}
       </div>
       <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
-        Arrastra para girar · rueda o botones para acercar
+        {ringDrag?.active
+          ? "Mové el mouse para ver la silueta · clic para colocar la anilla"
+          : "Arrastra para girar · rueda o botones para acercar"}
       </div>
     </div>
   );

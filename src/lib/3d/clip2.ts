@@ -41,6 +41,12 @@ export function union(rings: Ring[]): Ring[] {
   return toFloat(execute(ET.ctUnion, toInt(rings), null, FT.pftEvenOdd, FT.pftEvenOdd));
 }
 
+/** Unión de regiones sólidas (relleno no-cero): fusiona los solapes en lugar de restarlos. */
+export function unionSolid(rings: Ring[]): Ring[] {
+  if (rings.length === 0) return [];
+  return toFloat(execute(ET.ctUnion, toInt(rings), null, FT.pftNonZero, FT.pftNonZero));
+}
+
 export function difference(subject: Ring[], clip: Ring[]): Ring[] {
   if (subject.length === 0) return [];
   if (clip.length === 0) return subject;
