@@ -15,24 +15,21 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   Ban,
-  Box,
   ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Circle,
   Coffee,
   Download,
-  Eye,
-  EyeOff,
   FileUp,
   Grid3x3,
   Hexagon,
   Image as ImageIcon,
-  Layers,
   LayoutGrid,
   Loader2,
   Octagon,
   Palette,
   RotateCcw,
-  Ruler,
   Scaling,
   Shapes,
   Square,
@@ -77,7 +74,7 @@ import { splitSvgByColor } from "@/lib/image/trace";
 import { ModelViewer } from "./model-viewer";
 
 const DESCRIPTION =
-  "Diseña un posavasos listo para imprimir: elegí la forma y el tamaño, sumá una imagen vectorizada o un patrón (grabado o en relieve), agregá un labio y exportá el modelo.";
+  "Diseña un posavasos listo para imprimir: elegí la forma y el tamaño, sumá una imagen vectorizada o un patrón (grabado o en relieve), agregá un borde y exportá el modelo.";
 
 const BUILD_DELAY = 200;
 
@@ -98,8 +95,8 @@ const PLACEMENTS: { value: CoasterPlacement; label: string }[] = [
 ];
 
 const SHAPES: { value: CoasterShape; label: string; icon: LucideIcon }[] = [
-  { value: "square", label: "Cuadrado", icon: Square },
   { value: "round", label: "Redondo", icon: Circle },
+  { value: "square", label: "Cuadrado", icon: Square },
   { value: "hex", label: "Hexágono", icon: Hexagon },
   { value: "oct", label: "Octágono", icon: Octagon },
 ];
@@ -157,10 +154,9 @@ export function PosavasoTool() {
   const [exporting, setExporting] = useState<"stl" | "3mf" | null>(null);
   const [panel, setPanel] = useState<PanelTab>("base");
   const [expanded, setExpanded] = useState(false);
-  const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({
-    shape: true,
-    design: true,
-  });
+  const [openPanels, setOpenPanels] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(PANEL_IDS.map((id) => [id, true]))
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const togglePanel = useCallback((id: string) => {
@@ -172,8 +168,7 @@ export function PosavasoTool() {
   const toggleAllPanels = useCallback(() => {
     setOpenPanels((current) => {
       const everyOpen = PANEL_IDS.every((id) => current[id]);
-      if (everyOpen) return {};
-      return Object.fromEntries(PANEL_IDS.map((id) => [id, true]));
+      return Object.fromEntries(PANEL_IDS.map((id) => [id, !everyOpen]));
     });
   }, []);
 
@@ -383,7 +378,7 @@ export function PosavasoTool() {
           </div>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          {expanded ? null : (
+          {expanded || !usingHandoff ? null : (
             <Button asChild size="sm" variant="outline">
               <Link href="/tools/image">
                 <ArrowLeft className="size-4" />
@@ -542,28 +537,30 @@ export function PosavasoTool() {
             className="gap-4"
           >
             <div className="flex items-center gap-2">
-              <TabsList className="grid flex-1 grid-cols-2">
+              <TabsList className="grid h-9 flex-1 grid-cols-2">
                 <TabsTrigger value="base">Base</TabsTrigger>
                 <TabsTrigger value="design">Diseño</TabsTrigger>
               </TabsList>
               <Button
                 size="icon-sm"
-                variant="ghost"
+                variant="outline"
                 onClick={toggleAllPanels}
                 aria-label={
-                  allPanelsOpen ? "Colapsar todas las secciones" : "Expandir todas las secciones"
+                  allPanelsOpen
+                    ? "Contraer todas las secciones"
+                    : "Expandir todas las secciones"
                 }
-                title={allPanelsOpen ? "Colapsar todo" : "Expandir todo"}
+                title={allPanelsOpen ? "Contraer todo" : "Expandir todo"}
               >
                 {allPanelsOpen ? (
-                  <EyeOff className="size-4" />
+                  <ChevronsDownUp className="size-4" />
                 ) : (
-                  <Eye className="size-4" />
+                  <ChevronsUpDown className="size-4" />
                 )}
               </Button>
             </div>
 
-            <TabsContent value="design" className="space-y-1">
+            <TabsContent value="design" className="space-y-2">
               <Panel
                 id="design"
                 icon={Palette}
@@ -806,56 +803,104 @@ export function PosavasoTool() {
               </div>
             ) : null}
               </Panel>
-              {settings.designMode === "through" ||
-              designKind === "none" ||
-              showsMosaic ? null : (
+              {designKind === "none" || showsMosaic ? null : (
                 <Panel
                   id="placement"
-                  icon={Box}
-                  title="Ubicación del diseño"
-                  summary={`${bandLayers} de ${settings.layers} capas`}
+                  icon={Scaling}
+                  title="Posición y escala"
+                  summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
                   open={openPanels.placement}
                   onToggle={togglePanel}
                 >
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {PLACEMENTS.map((placement) => (
-                        <Button
-                          key={placement.value}
-                          size="sm"
-                          variant={
-                            settings.placement === placement.value
-                              ? "default"
-                              : "outline"
-                          }
-                          aria-pressed={settings.placement === placement.value}
-                          className="px-1 text-[11px]"
-                          onClick={() =>
-                            updateSettings({ placement: placement.value })
-                          }
-                        >
-                          {placement.label}
-                        </Button>
-                      ))}
-                    </div>
-                    {settings.placement !== "full" ? (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs">Capas del relieve</Label>
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            {bandLayers}
-                          </span>
-                        </div>
-                        <Slider
-                          min={1}
-                          max={Math.max(1, settings.layers - 1)}
-                          step={1}
-                          value={[settings.bandLayers]}
-                          onValueChange={([value]) =>
-                            updateSettings({ bandLayers: value })
-                          }
-                        />
+                  {settings.designMode === "through" ? null : (
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Ubicación vertical</Label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {PLACEMENTS.map((placement) => (
+                          <Button
+                            key={placement.value}
+                            size="sm"
+                            variant={
+                              settings.placement === placement.value
+                                ? "default"
+                                : "outline"
+                            }
+                            aria-pressed={
+                              settings.placement === placement.value
+                            }
+                            className="px-1 text-[11px]"
+                            onClick={() =>
+                              updateSettings({ placement: placement.value })
+                            }
+                          >
+                            {placement.label}
+                          </Button>
+                        ))}
                       </div>
-                    ) : null}
+                      {settings.placement !== "full" ? (
+                        <div className="space-y-1.5 pt-1.5">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs">Capas del relieve</Label>
+                            <span className="text-[11px] tabular-nums text-muted-foreground">
+                              {bandLayers}
+                            </span>
+                          </div>
+                          <Slider
+                            min={1}
+                            max={Math.max(1, settings.layers - 1)}
+                            step={1}
+                            value={[settings.bandLayers]}
+                            onValueChange={([value]) =>
+                              updateSettings({ bandLayers: value })
+                            }
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">Escala del diseño</Label>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {settings.scalePercent}%
+                      </span>
+                    </div>
+                    <Slider
+                      min={20}
+                      max={300}
+                      step={5}
+                      value={[settings.scalePercent]}
+                      onValueChange={([value]) =>
+                        updateSettings({ scalePercent: value })
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Podés pasar del 100%: lo que quede fuera del posavasos se
+                      recorta.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">Rotación del diseño</Label>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {settings.designRotation}°
+                      </span>
+                    </div>
+                    <Slider
+                      min={0}
+                      max={345}
+                      step={15}
+                      value={[settings.designRotation]}
+                      onValueChange={([value]) =>
+                        updateSettings({ designRotation: value })
+                      }
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Gira el diseño sobre el centro del posavasos.
+                    </p>
+                  </div>
                 </Panel>
               )}
 
@@ -1067,276 +1112,157 @@ export function PosavasoTool() {
                   )}
                 </Panel>
               ) : null}
-
-              {designKind === "none" || designKind === "mosaic" ? null : (
-                <Panel
-                  id="scale"
-                  icon={Scaling}
-                  title="Tamaño y rotación"
-                  summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
-                  open={openPanels.scale}
-                  onToggle={togglePanel}
-                >
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">Escala del diseño</Label>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {settings.scalePercent}%
-                      </span>
-                    </div>
-                    <Slider
-                      min={20}
-                      max={300}
-                      step={5}
-                      value={[settings.scalePercent]}
-                      onValueChange={([value]) =>
-                        updateSettings({ scalePercent: value })
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Podés pasar del 100%: lo que quede fuera del posavasos se
-                      recorta.
-                    </p>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">Rotación del diseño</Label>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {settings.designRotation}°
-                      </span>
-                    </div>
-                    <Slider
-                      min={0}
-                      max={345}
-                      step={15}
-                      value={[settings.designRotation]}
-                      onValueChange={([value]) =>
-                        updateSettings({ designRotation: value })
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Gira el diseño sobre el centro del posavasos.
-                    </p>
-                  </div>
-                </Panel>
-              )}
             </TabsContent>
 
-            <TabsContent value="base" className="space-y-1">
+            <TabsContent value="base" className="space-y-2">
               <Panel
                 id="shape"
                 icon={Shapes}
-                title="Forma"
-                summary={SHAPES.find((shape) => shape.value === settings.shape)?.label}
+                title="Forma y medidas"
+                summary={`${SHAPES.find((shape) => shape.value === settings.shape)?.label} · ${settings.widthMm.toFixed(0)} mm · ${settings.layers} capas`}
                 open={openPanels.shape}
                 onToggle={togglePanel}
               >
                 <div className="grid grid-cols-4 gap-1.5">
-              {SHAPES.map((shape) => {
-                const ShapeIcon = shape.icon;
-                const selected = settings.shape === shape.value;
-                return (
-                  <button
-                    key={shape.value}
-                    type="button"
-                    aria-pressed={selected}
-                    aria-label={shape.label}
-                    title={shape.label}
-                    onClick={() => updateSettings({ shape: shape.value })}
-                    className={`flex h-12 items-center justify-center rounded-md border transition-colors ${
-                      selected
-                        ? "border-primary/60 bg-primary/10 text-primary"
-                        : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
-                    }`}
-                  >
-                    <ShapeIcon className="size-5" />
-                  </button>
-                );
-              })}
-            </div>
-            {settings.shape === "square" ? (
-              <div className="space-y-1.5 pt-1">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs">Redondeo de puntas</Label>
-                  <span className="text-[11px] tabular-nums text-muted-foreground">
-                    {settings.cornerMm.toFixed(1)} mm
-                  </span>
+                  {SHAPES.map((shape) => {
+                    const ShapeIcon = shape.icon;
+                    const selected = settings.shape === shape.value;
+                    return (
+                      <button
+                        key={shape.value}
+                        type="button"
+                        aria-pressed={selected}
+                        aria-label={shape.label}
+                        title={shape.label}
+                        onClick={() => updateSettings({ shape: shape.value })}
+                        className={`flex h-12 items-center justify-center rounded-md border transition-colors ${
+                          selected
+                            ? "border-primary/60 bg-primary/10 text-primary"
+                            : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
+                        }`}
+                      >
+                        <ShapeIcon className="size-5" />
+                      </button>
+                    );
+                  })}
                 </div>
-                <Slider
-                  min={2}
-                  max={Math.max(2, settings.widthMm / 2 - 2)}
-                  step={0.5}
-                  value={[settings.cornerMm]}
-                  onValueChange={([value]) =>
-                    updateSettings({ cornerMm: value })
-                  }
-                />
-              </div>
-            ) : null}
-              </Panel>
 
-              <Panel
-                id="measures"
-                icon={Ruler}
-                title="Medidas"
-                summary={`${settings.widthMm.toFixed(0)} mm · ${settings.layers} capas`}
-                open={openPanels.measures}
-                onToggle={togglePanel}
-              >
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs">
-                  {settings.shape === "round"
-                    ? "Diámetro"
-                    : settings.shape === "square"
-                      ? "Lado"
-                      : "Ancho"}
-                </Label>
-                <span className="text-[11px] tabular-nums text-muted-foreground">
-                  {settings.widthMm.toFixed(0)} mm
-                </span>
-              </div>
-              <Slider
-                min={50}
-                max={140}
-                step={1}
-                value={[settings.widthMm]}
-                onValueChange={([value]) => updateSettings({ widthMm: value })}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="coaster-layers" className="text-xs">
-                  Capas totales
-                </Label>
-                <Input
-                  id="coaster-layers"
-                  type="number"
-                  min={2}
-                  max={60}
-                  value={settings.layers}
-                  onChange={(event) =>
-                    updateSettings({
-                      layers: Math.max(
-                        2,
-                        Math.min(60, Number(event.target.value) || 2)
-                      ),
-                    })
-                  }
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="coaster-layer-height" className="text-xs">
-                  Altura de capa (mm)
-                </Label>
-                <Input
-                  id="coaster-layer-height"
-                  type="number"
-                  min={0.06}
-                  max={0.4}
-                  step={0.02}
-                  value={settings.layerHeightMm}
-                  onChange={(event) =>
-                    updateSettings({
-                      layerHeightMm: Math.max(
-                        0.06,
-                        Math.min(0.4, Number(event.target.value) || 0.2)
-                      ),
-                    })
-                  }
-                />
-              </div>
-            </div>
-            {designKind === "image" ? (
-              <div className="space-y-1.5">
-                <Label htmlFor="coaster-margin" className="text-xs">
-                  Margen desde el borde: {settings.marginMm.toFixed(0)} mm
-                </Label>
-                <Slider
-                  min={0}
-                  max={20}
-                  step={1}
-                  value={[settings.marginMm]}
-                  onValueChange={([value]) =>
-                    updateSettings({ marginMm: value })
-                  }
-                />
-              </div>
-            ) : null}
+                {settings.shape === "square" ? (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs">Redondeo de puntas</Label>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {settings.cornerMm.toFixed(1)} mm
+                      </span>
+                    </div>
+                    <Slider
+                      min={2}
+                      max={Math.max(2, settings.widthMm / 2 - 2)}
+                      step={0.5}
+                      value={[settings.cornerMm]}
+                      onValueChange={([value]) =>
+                        updateSettings({ cornerMm: value })
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs">
+                      {settings.shape === "round"
+                        ? "Diámetro"
+                        : settings.shape === "square"
+                          ? "Lado"
+                          : "Ancho"}
+                    </Label>
+                    <span className="text-[11px] tabular-nums text-muted-foreground">
+                      {settings.widthMm.toFixed(0)} mm
+                    </span>
+                  </div>
+                  <Slider
+                    min={50}
+                    max={140}
+                    step={1}
+                    value={[settings.widthMm]}
+                    onValueChange={([value]) =>
+                      updateSettings({ widthMm: value })
+                    }
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="coaster-layers" className="text-xs">
+                      Capas totales
+                    </Label>
+                    <Input
+                      id="coaster-layers"
+                      type="number"
+                      min={2}
+                      max={60}
+                      value={settings.layers}
+                      onChange={(event) =>
+                        updateSettings({
+                          layers: Math.max(
+                            2,
+                            Math.min(60, Number(event.target.value) || 2)
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="coaster-layer-height" className="text-xs">
+                      Altura de capa (mm)
+                    </Label>
+                    <Input
+                      id="coaster-layer-height"
+                      type="number"
+                      min={0.06}
+                      max={0.4}
+                      step={0.02}
+                      value={settings.layerHeightMm}
+                      onChange={(event) =>
+                        updateSettings({
+                          layerHeightMm: Math.max(
+                            0.06,
+                            Math.min(0.4, Number(event.target.value) || 0.2)
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                {designKind === "image" ? (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="coaster-margin" className="text-xs">
+                      Margen desde el borde: {settings.marginMm.toFixed(0)} mm
+                    </Label>
+                    <Slider
+                      min={0}
+                      max={20}
+                      step={1}
+                      value={[settings.marginMm]}
+                      onValueChange={([value]) =>
+                        updateSettings({ marginMm: value })
+                      }
+                    />
+                  </div>
+                ) : null}
               </Panel>
 
               <Panel
                 id="border"
-                icon={Layers}
-                title="Borde"
+                icon={Palette}
+                title="Color y borde"
                 summary={
                   settings.borderEnabled
-                    ? `${settings.borderWidthMm.toFixed(1)} mm · ${settings.borderLayers} capas`
-                    : "sin labio"
+                    ? `${settings.baseColor} · borde ${settings.borderWidthMm.toFixed(1)} mm`
+                    : settings.baseColor
                 }
                 open={openPanels.border}
-                onToggle={togglePanel}
-              >
-            <Button
-              size="sm"
-              variant={settings.borderEnabled ? "default" : "outline"}
-              aria-pressed={settings.borderEnabled}
-              className="w-full"
-              onClick={() =>
-                updateSettings({ borderEnabled: !settings.borderEnabled })
-              }
-            >
-              {settings.borderEnabled
-                ? "Labio activado"
-                : "Agregar labio elevado"}
-            </Button>
-            {settings.borderEnabled ? (
-              <>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs">Ancho del labio</Label>
-                    <span className="text-[11px] tabular-nums text-muted-foreground">
-                      {settings.borderWidthMm.toFixed(1)} mm
-                    </span>
-                  </div>
-                  <Slider
-                    min={1}
-                    max={Math.max(2, settings.widthMm / 4)}
-                    step={0.5}
-                    value={[settings.borderWidthMm]}
-                    onValueChange={([value]) =>
-                      updateSettings({ borderWidthMm: value })
-                    }
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs">Altura del labio</Label>
-                    <span className="text-[11px] tabular-nums text-muted-foreground">
-                      {settings.borderLayers} capas
-                    </span>
-                  </div>
-                  <Slider
-                    min={1}
-                    max={12}
-                    step={1}
-                    value={[settings.borderLayers]}
-                    onValueChange={([value]) =>
-                      updateSettings({ borderLayers: value })
-                    }
-                  />
-                </div>
-              </>
-            ) : null}
-              </Panel>
-
-              <Panel
-                id="baseColor"
-                icon={Palette}
-                title="Color de la base"
-                summary={settings.baseColor}
-                open={openPanels.baseColor}
                 onToggle={togglePanel}
               >
                 <div className="flex items-center justify-between gap-2">
@@ -1352,6 +1278,60 @@ export function PosavasoTool() {
                     }
                     className="h-8 w-14 cursor-pointer rounded-md border bg-transparent"
                   />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Button
+                    size="sm"
+                    variant={settings.borderEnabled ? "default" : "outline"}
+                    aria-pressed={settings.borderEnabled}
+                    className="w-full"
+                    onClick={() =>
+                      updateSettings({ borderEnabled: !settings.borderEnabled })
+                    }
+                  >
+                    {settings.borderEnabled
+                      ? "Borde activado"
+                      : "Agregar borde elevado"}
+                  </Button>
+                  {settings.borderEnabled ? (
+                    <div className="space-y-1.5 pt-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs">Ancho del borde</Label>
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {settings.borderWidthMm.toFixed(1)} mm
+                        </span>
+                      </div>
+                      <Slider
+                        min={1}
+                        max={Math.max(2, settings.widthMm / 4)}
+                        step={0.5}
+                        value={[settings.borderWidthMm]}
+                        onValueChange={([value]) =>
+                          updateSettings({ borderWidthMm: value })
+                        }
+                      />
+                    </div>
+                  ) : null}
+                  {settings.borderEnabled ? (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs">Altura del borde</Label>
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {settings.borderLayers} capas
+                        </span>
+                      </div>
+                      <Slider
+                        min={1}
+                        max={12}
+                        step={1}
+                        value={[settings.borderLayers]}
+                        onValueChange={([value]) =>
+                          updateSettings({ borderLayers: value })
+                        }
+                      />
+                    </div>
+                  ) : null}
                 </div>
               </Panel>
             </TabsContent>
@@ -1375,12 +1355,9 @@ export function PosavasoTool() {
 
 const PANEL_IDS = [
   "shape",
-  "measures",
   "border",
-  "baseColor",
   "design",
   "placement",
-  "scale",
   "mosaic",
 ] as const;
 
@@ -1389,7 +1366,7 @@ function Panel({
   title,
   icon: Icon,
   summary,
-  open = false,
+  open,
   onToggle,
   children,
 }: {
@@ -1397,34 +1374,36 @@ function Panel({
   title: string;
   icon: LucideIcon;
   summary?: string;
-  open?: boolean;
+  open: boolean;
   onToggle: (id: string) => void;
   children: ReactNode;
 }) {
   return (
-    <div className="border-b border-border/60 last:border-b-0">
+    <div className="overflow-hidden rounded-xl border bg-card">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => onToggle(id)}
-        className="flex w-full cursor-pointer items-center justify-between gap-2 py-2 text-left text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-accent/40"
       >
-        <span className="flex items-center gap-2">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
           <Icon className="size-3.5" />
-          {title}
         </span>
-        <span className="flex items-center gap-2">
-          {summary ? (
-            <span className="text-[11px] font-normal tabular-nums">
-              {summary}
-            </span>
-          ) : null}
-          <ChevronDown
-            className={`size-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
-          />
-        </span>
+        <span className="flex-1 text-sm font-medium">{title}</span>
+        {summary ? (
+          <span className="shrink-0 text-[11px] font-normal tabular-nums text-muted-foreground">
+            {summary}
+          </span>
+        ) : null}
+        <ChevronDown
+          className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+        />
       </button>
-      {open ? <div className="space-y-3 pb-3 pt-1">{children}</div> : null}
+      {open ? (
+        <div className="space-y-3 border-t border-border/60 px-3 py-3">
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 }

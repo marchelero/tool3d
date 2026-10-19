@@ -46,7 +46,7 @@ export interface CoasterSettings {
 }
 
 export const DEFAULT_COASTER_SETTINGS: CoasterSettings = {
-  shape: "square",
+  shape: "round",
   widthMm: 90,
   cornerMm: 14,
   layers: 12,
