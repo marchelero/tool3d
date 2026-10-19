@@ -32,7 +32,9 @@ import {
   RotateCcw,
   Scaling,
   Shapes,
+  SlidersHorizontal,
   Square,
+  TriangleAlert,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -91,7 +93,7 @@ const subscribeHandoff = () => () => {};
 const PLACEMENTS: { value: CoasterPlacement; label: string }[] = [
   { value: "top", label: "Arriba" },
   { value: "bottom", label: "Abajo" },
-  { value: "full", label: "Todo el alto" },
+  { value: "full", label: "Espesor completo" },
 ];
 
 const SHAPES: { value: CoasterShape; label: string; icon: LucideIcon }[] = [
@@ -113,6 +115,8 @@ const DESIGN_MODES: { value: DesignMode; label: string }[] = [
   { value: "raise", label: "Relieve" },
   { value: "through", label: "Huecos" },
 ];
+
+const SIZE_PRESETS = [80, 90, 100, 120];
 
 function svgSize(svgText: string): { width: number; height: number } {
   const viewBox = svgText.match(/viewBox="([\d.\-\s]+)"/);
@@ -263,6 +267,22 @@ export function PosavasoTool() {
     setSettings(DEFAULT_COASTER_SETTINGS);
   }, []);
 
+  const handleReset = useCallback(() => {
+    setSettings((current) => ({
+      ...current,
+      shape: DEFAULT_COASTER_SETTINGS.shape,
+      widthMm: DEFAULT_COASTER_SETTINGS.widthMm,
+      cornerMm: DEFAULT_COASTER_SETTINGS.cornerMm,
+      layers: DEFAULT_COASTER_SETTINGS.layers,
+      layerHeightMm: DEFAULT_COASTER_SETTINGS.layerHeightMm,
+      placement: DEFAULT_COASTER_SETTINGS.placement,
+      bandLayers: DEFAULT_COASTER_SETTINGS.bandLayers,
+      marginMm: DEFAULT_COASTER_SETTINGS.marginMm,
+      scalePercent: DEFAULT_COASTER_SETTINGS.scalePercent,
+      designRotation: DEFAULT_COASTER_SETTINGS.designRotation,
+    }));
+  }, []);
+
   const handleSvgFile = useCallback(async (file: File) => {
     try {
       const text = await file.text();
@@ -304,14 +324,6 @@ export function PosavasoTool() {
       }
     },
     [model, sourceName]
-  );
-
-  const bandLayers = useMemo(
-    () =>
-      settings.placement === "full"
-        ? settings.layers
-        : Math.min(settings.bandLayers, settings.layers),
-    [settings.bandLayers, settings.layers, settings.placement]
   );
 
   const patternPreviews = useMemo(
@@ -395,6 +407,7 @@ export function PosavasoTool() {
           <Button
             size="sm"
             disabled={!model || (!!exporting && exporting !== "stl")}
+            title="STL: geometría en un solo color (sin información de color)"
             onClick={() => void handleExport("stl")}
           >
             {exporting === "stl" ? (
@@ -407,6 +420,7 @@ export function PosavasoTool() {
           <Button
             size="sm"
             disabled={!model || (!!exporting && exporting !== "3mf")}
+            title="3MF: conserva el color de cada filamento (para imprimir a color)"
             onClick={() => void handleExport("3mf")}
           >
             {exporting === "3mf" ? (
@@ -438,6 +452,7 @@ export function PosavasoTool() {
               meshes={meshes}
               widthMm={settings.widthMm}
               heightMm={model?.totalHeightMm ?? 0}
+              designMm={model?.designWidthMm ?? 0}
               expanded={expanded}
               onToggleExpanded={() => setExpanded((value) => !value)}
               className={
@@ -501,23 +516,35 @@ export function PosavasoTool() {
               ) : null}
 
               {model && model.colors.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    Colores:
-                  </span>
-                  <span
-                    className="size-4 rounded-sm border"
-                    style={{ backgroundColor: settings.baseColor }}
-                    title="Base"
-                  />
-                  {model.colors.map((color) => (
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-muted-foreground">
+                      Colores:
+                    </span>
                     <span
-                      key={color}
                       className="size-4 rounded-sm border"
-                      style={{ backgroundColor: color }}
-                      title={color}
+                      style={{ backgroundColor: settings.baseColor }}
+                      title="Base"
                     />
-                  ))}
+                    {model.colors.map((color) => (
+                      <span
+                        key={color}
+                        className="size-4 rounded-sm border"
+                        style={{ backgroundColor: color }}
+                        title={color}
+                      />
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    3MF usa {model.colors.length + 1} filamentos (base +
+                    colores); STL va en un solo color.
+                  </p>
+                  {model.colors.length + 1 > 4 ? (
+                    <p className="flex items-center gap-1 text-[11px] text-amber-600">
+                      <TriangleAlert className="size-3 shrink-0" />
+                      Este diseño pide más filamentos que ranuras de un AMS (4).
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </>
@@ -528,7 +555,7 @@ export function PosavasoTool() {
           className={
             expanded
               ? "flex min-h-0 flex-col overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
-              : "space-y-4"
+              : "space-y-4 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:overflow-y-auto lg:pr-1"
           }
         >
           <Tabs
@@ -536,7 +563,13 @@ export function PosavasoTool() {
             onValueChange={(value: string) => setPanel(value as PanelTab)}
             className="gap-4"
           >
-            <div className="flex items-center gap-2">
+            <div
+              className={
+                expanded
+                  ? "flex items-center gap-2"
+                  : "sticky -top-1 z-10 -mx-1 flex items-center gap-2 bg-background/95 px-1 py-2 backdrop-blur"
+              }
+            >
               <TabsList className="grid h-9 flex-1 grid-cols-2">
                 <TabsTrigger value="base">Base</TabsTrigger>
                 <TabsTrigger value="design">Diseño</TabsTrigger>
@@ -561,6 +594,68 @@ export function PosavasoTool() {
             </div>
 
             <TabsContent value="design" className="space-y-2">
+              {designKind === "image" || showsPattern ? (
+                <div className="space-y-2.5 rounded-xl border bg-card p-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <SlidersHorizontal className="size-3.5" />
+                    </span>
+                    <span className="flex-1 text-sm font-medium">Modo</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {
+                        DESIGN_MODES.find(
+                          (mode) => mode.value === settings.designMode
+                        )?.label
+                      }
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {DESIGN_MODES.map((mode) => (
+                      <Button
+                        key={mode.value}
+                        size="sm"
+                        variant={
+                          settings.designMode === mode.value
+                            ? "default"
+                            : "outline"
+                        }
+                        aria-pressed={settings.designMode === mode.value}
+                        onClick={() =>
+                          updateSettings({ designMode: mode.value })
+                        }
+                      >
+                        {mode.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {settings.designMode === "raise"
+                      ? "El diseño sobresale por encima de la superficie."
+                      : settings.designMode === "through"
+                        ? "El diseño atraviesa todas las capas y deja huecos pasantes."
+                        : "El diseño queda hundido, al ras del color."}
+                  </p>
+                  {showsPattern && settings.designMode !== "through" ? (
+                    <Button
+                      size="sm"
+                      variant={settings.designInvert ? "default" : "outline"}
+                      aria-pressed={settings.designInvert}
+                      className="w-full"
+                      onClick={() =>
+                        updateSettings({ designInvert: !settings.designInvert })
+                      }
+                    >
+                      Invertir
+                    </Button>
+                  ) : null}
+                  {settings.designInvert && showsPattern ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Ahora la red entre las celdas es la que sobresale (o se
+                      rebaja) y las celdas quedan como huecos.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <Panel
                 id="design"
                 icon={Palette}
@@ -701,40 +796,30 @@ export function PosavasoTool() {
                     del posavasos.
                   </p>
                 </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs">Tamaño de celda</Label>
-                    <span className="text-[11px] tabular-nums text-muted-foreground">
-                      {settings.patternCellMm.toFixed(1)} mm
-                    </span>
-                  </div>
-                  <Slider
-                    min={3}
-                    max={25}
-                    step={0.5}
-                    value={[settings.patternCellMm]}
-                    onValueChange={([value]) =>
-                      updateSettings({ patternCellMm: value })
-                    }
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs">Grosor</Label>
-                    <span className="text-[11px] tabular-nums text-muted-foreground">
-                      {settings.patternThicknessMm.toFixed(1)} mm
-                    </span>
-                  </div>
-                  <Slider
-                    min={0.5}
-                    max={6}
-                    step={0.1}
-                    value={[settings.patternThicknessMm]}
-                    onValueChange={([value]) =>
-                      updateSettings({ patternThicknessMm: value })
-                    }
-                  />
-                </div>
+                <NumberSlider
+                  id="coaster-pattern-cell"
+                  label="Tamaño de celda"
+                  value={settings.patternCellMm}
+                  min={3}
+                  max={25}
+                  step={0.5}
+                  unit="mm"
+                  onChange={(value) =>
+                    updateSettings({ patternCellMm: value })
+                  }
+                />
+                <NumberSlider
+                  id="coaster-pattern-thickness"
+                  label="Grosor"
+                  value={settings.patternThicknessMm}
+                  min={0.5}
+                  max={6}
+                  step={0.1}
+                  unit="mm"
+                  onChange={(value) =>
+                    updateSettings({ patternThicknessMm: value })
+                  }
+                />
                 <div className="flex items-center justify-between gap-2">
                   <Label htmlFor="coaster-pattern-color" className="text-xs">
                     Color del patrón
@@ -752,56 +837,6 @@ export function PosavasoTool() {
               </div>
             ) : null}
 
-            {showsPattern || designKind === "image" ? (
-              <div className="space-y-1.5">
-                <Label className="text-xs">Modo</Label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {DESIGN_MODES.map((mode) => (
-                    <Button
-                      key={mode.value}
-                      size="sm"
-                      variant={
-                        settings.designMode === mode.value
-                          ? "default"
-                          : "outline"
-                      }
-                      aria-pressed={settings.designMode === mode.value}
-                      onClick={() =>
-                        updateSettings({ designMode: mode.value })
-                      }
-                    >
-                      {mode.label}
-                    </Button>
-                  ))}
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  {settings.designMode === "raise"
-                    ? "El diseño sobresale por encima de la superficie."
-                    : settings.designMode === "through"
-                      ? "El diseño atraviesa todas las capas y deja huecos pasantes."
-                      : "El diseño queda hundido, al ras del color."}
-                </p>
-                {showsPattern && settings.designMode !== "through" ? (
-                  <Button
-                    size="sm"
-                    variant={settings.designInvert ? "default" : "outline"}
-                    aria-pressed={settings.designInvert}
-                    className="w-full"
-                    onClick={() =>
-                      updateSettings({ designInvert: !settings.designInvert })
-                    }
-                  >
-                    Invertir
-                  </Button>
-                ) : null}
-                {settings.designInvert && showsPattern ? (
-                  <p className="text-[11px] text-muted-foreground">
-                    Ahora la red entre las celdas es la que sobresale (o se
-                    rebaja) y las celdas quedan como huecos.
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
               </Panel>
               {designKind === "none" || showsMosaic ? null : (
                 <Panel
@@ -838,69 +873,51 @@ export function PosavasoTool() {
                         ))}
                       </div>
                       {settings.placement !== "full" ? (
-                        <div className="space-y-1.5 pt-1.5">
-                          <div className="flex items-center justify-between">
-                            <Label className="text-xs">Capas del relieve</Label>
-                            <span className="text-[11px] tabular-nums text-muted-foreground">
-                              {bandLayers}
-                            </span>
-                          </div>
-                          <Slider
-                            min={1}
-                            max={Math.max(1, settings.layers - 1)}
-                            step={1}
-                            value={[settings.bandLayers]}
-                            onValueChange={([value]) =>
-                              updateSettings({ bandLayers: value })
-                            }
-                          />
-                        </div>
+                        <NumberSlider
+                          id="coaster-band-layers"
+                          label="Capas del relieve"
+                          value={settings.bandLayers}
+                          min={1}
+                          max={Math.max(1, settings.layers - 1)}
+                          step={1}
+                          decimals={0}
+                          onChange={(value) =>
+                            updateSettings({ bandLayers: value })
+                          }
+                        />
                       ) : null}
                     </div>
                   )}
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">Escala del diseño</Label>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {settings.scalePercent}%
-                      </span>
-                    </div>
-                    <Slider
-                      min={20}
-                      max={300}
-                      step={5}
-                      value={[settings.scalePercent]}
-                      onValueChange={([value]) =>
-                        updateSettings({ scalePercent: value })
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Podés pasar del 100%: lo que quede fuera del posavasos se
-                      recorta.
-                    </p>
-                  </div>
+                  <NumberSlider
+                    id="coaster-scale"
+                    label="Escala del diseño"
+                    value={settings.scalePercent}
+                    min={20}
+                    max={300}
+                    step={5}
+                    unit="%"
+                    decimals={0}
+                    hint="Podés pasar del 100%: lo que quede fuera del posavasos se recorta."
+                    onChange={(value) =>
+                      updateSettings({ scalePercent: value })
+                    }
+                  />
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">Rotación del diseño</Label>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {settings.designRotation}°
-                      </span>
-                    </div>
-                    <Slider
-                      min={0}
-                      max={345}
-                      step={15}
-                      value={[settings.designRotation]}
-                      onValueChange={([value]) =>
-                        updateSettings({ designRotation: value })
-                      }
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Gira el diseño sobre el centro del posavasos.
-                    </p>
-                  </div>
+                  <NumberSlider
+                    id="coaster-rotation"
+                    label="Rotación del diseño"
+                    value={settings.designRotation}
+                    min={0}
+                    max={345}
+                    step={15}
+                    unit="°"
+                    decimals={0}
+                    hint="Gira el diseño sobre el centro del posavasos."
+                    onChange={(value) =>
+                      updateSettings({ designRotation: value })
+                    }
+                  />
                 </Panel>
               )}
 
@@ -969,63 +986,47 @@ export function PosavasoTool() {
                         </div>
                       </div>
 
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs">Tamaño de la pieza</Label>
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            {settings.mosaicTileMm} mm
-                          </span>
-                        </div>
-                        <Slider
-                          min={4}
-                          max={40}
-                          step={1}
-                          value={[settings.mosaicTileMm]}
-                          onValueChange={([value]) =>
-                            updateSettings({ mosaicTileMm: value })
-                          }
-                        />
-                      </div>
+                      <NumberSlider
+                        id="coaster-mosaic-tile"
+                        label="Tamaño de la pieza"
+                        value={settings.mosaicTileMm}
+                        min={4}
+                        max={40}
+                        step={1}
+                        unit="mm"
+                        decimals={0}
+                        onChange={(value) =>
+                          updateSettings({ mosaicTileMm: value })
+                        }
+                      />
 
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs">Separación</Label>
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            {settings.mosaicGapMm} mm
-                          </span>
-                        </div>
-                        <Slider
-                          min={0}
-                          max={8}
-                          step={0.5}
-                          value={[settings.mosaicGapMm]}
-                          onValueChange={([value]) =>
-                            updateSettings({ mosaicGapMm: value })
-                          }
-                        />
-                      </div>
+                      <NumberSlider
+                        id="coaster-mosaic-gap"
+                        label="Separación"
+                        value={settings.mosaicGapMm}
+                        min={0}
+                        max={8}
+                        step={0.5}
+                        unit="mm"
+                        onChange={(value) =>
+                          updateSettings({ mosaicGapMm: value })
+                        }
+                      />
 
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs">Rotación del mosaico</Label>
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            {settings.mosaicRotation}°
-                          </span>
-                        </div>
-                        <Slider
-                          min={0}
-                          max={345}
-                          step={15}
-                          value={[settings.mosaicRotation]}
-                          onValueChange={([value]) =>
-                            updateSettings({ mosaicRotation: value })
-                          }
-                        />
-                        <p className="text-[11px] text-muted-foreground">
-                          Gira el mosaico completo sobre el centro del
-                          posavasos.
-                        </p>
-                      </div>
+                      <NumberSlider
+                        id="coaster-mosaic-rotation"
+                        label="Rotación del mosaico"
+                        value={settings.mosaicRotation}
+                        min={0}
+                        max={345}
+                        step={15}
+                        unit="°"
+                        decimals={0}
+                        hint="Gira el mosaico completo sobre el centro del posavasos."
+                        onChange={(value) =>
+                          updateSettings({ mosaicRotation: value })
+                        }
+                      />
 
                       <div className="space-y-1.5">
                         <Label className="text-xs">Modo del mosaico</Label>
@@ -1083,30 +1084,20 @@ export function PosavasoTool() {
                             </Button>
                           ))}
                         </div>
-                        {settings.mosaicPlacement !== "full" ? (
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between">
-                              <Label className="text-xs">
-                                Capas del mosaico
-                              </Label>
-                              <span className="text-[11px] tabular-nums text-muted-foreground">
-                                {Math.min(
-                                  settings.mosaicLayers,
-                                  settings.layers
-                                )}
-                              </span>
-                            </div>
-                            <Slider
+                          {settings.mosaicPlacement !== "full" ? (
+                            <NumberSlider
+                              id="coaster-mosaic-layers"
+                              label="Capas del mosaico"
+                              value={settings.mosaicLayers}
                               min={1}
                               max={Math.max(1, settings.layers - 1)}
                               step={1}
-                              value={[settings.mosaicLayers]}
-                              onValueChange={([value]) =>
+                              decimals={0}
+                              onChange={(value) =>
                                 updateSettings({ mosaicLayers: value })
                               }
                             />
-                          </div>
-                        ) : null}
+                          ) : null}
                       </div>
                     </>
                   )}
@@ -1148,47 +1139,58 @@ export function PosavasoTool() {
                 </div>
 
                 {settings.shape === "square" ? (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">Redondeo de puntas</Label>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {settings.cornerMm.toFixed(1)} mm
-                      </span>
-                    </div>
-                    <Slider
-                      min={2}
-                      max={Math.max(2, settings.widthMm / 2 - 2)}
-                      step={0.5}
-                      value={[settings.cornerMm]}
-                      onValueChange={([value]) =>
-                        updateSettings({ cornerMm: value })
-                      }
-                    />
-                  </div>
+                  <NumberSlider
+                    id="coaster-corner"
+                    label="Redondeo de puntas"
+                    value={settings.cornerMm}
+                    min={2}
+                    max={Math.max(2, settings.widthMm / 2 - 2)}
+                    step={0.5}
+                    unit="mm"
+                    onChange={(value) => updateSettings({ cornerMm: value })}
+                  />
                 ) : null}
 
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs">
-                      {settings.shape === "round"
-                        ? "Diámetro"
-                        : settings.shape === "square"
-                          ? "Lado"
-                          : "Ancho"}
-                    </Label>
-                    <span className="text-[11px] tabular-nums text-muted-foreground">
-                      {settings.widthMm.toFixed(0)} mm
-                    </span>
-                  </div>
-                  <Slider
-                    min={50}
-                    max={140}
-                    step={1}
-                    value={[settings.widthMm]}
-                    onValueChange={([value]) =>
-                      updateSettings({ widthMm: value })
-                    }
-                  />
+                <NumberSlider
+                  id="coaster-width"
+                  label={
+                    settings.shape === "round"
+                      ? "Diámetro"
+                      : settings.shape === "square"
+                        ? "Lado"
+                        : "Ancho"
+                  }
+                  value={settings.widthMm}
+                  min={50}
+                  max={140}
+                  step={1}
+                  unit="mm"
+                  decimals={0}
+                  onChange={(value) => updateSettings({ widthMm: value })}
+                />
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-muted-foreground">
+                    Tamaño:
+                  </span>
+                  {SIZE_PRESETS.map((preset) => {
+                    const active = Math.round(settings.widthMm) === preset;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => updateSettings({ widthMm: preset })}
+                        className={`rounded-full border px-2 py-0.5 text-[11px] tabular-nums transition-colors ${
+                          active
+                            ? "border-primary/60 bg-primary/10 text-primary"
+                            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                        }`}
+                      >
+                        {preset} mm
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -1236,20 +1238,17 @@ export function PosavasoTool() {
                 </div>
 
                 {designKind === "image" ? (
-                  <div className="space-y-1.5">
-                    <Label htmlFor="coaster-margin" className="text-xs">
-                      Margen desde el borde: {settings.marginMm.toFixed(0)} mm
-                    </Label>
-                    <Slider
-                      min={0}
-                      max={20}
-                      step={1}
-                      value={[settings.marginMm]}
-                      onValueChange={([value]) =>
-                        updateSettings({ marginMm: value })
-                      }
-                    />
-                  </div>
+                  <NumberSlider
+                    id="coaster-margin"
+                    label="Margen desde el borde"
+                    value={settings.marginMm}
+                    min={0}
+                    max={20}
+                    step={1}
+                    unit="mm"
+                    decimals={0}
+                    onChange={(value) => updateSettings({ marginMm: value })}
+                  />
                 ) : null}
               </Panel>
 
@@ -1295,42 +1294,33 @@ export function PosavasoTool() {
                       : "Agregar borde elevado"}
                   </Button>
                   {settings.borderEnabled ? (
-                    <div className="space-y-1.5 pt-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs">Ancho del borde</Label>
-                        <span className="text-[11px] tabular-nums text-muted-foreground">
-                          {settings.borderWidthMm.toFixed(1)} mm
-                        </span>
-                      </div>
-                      <Slider
-                        min={1}
-                        max={Math.max(2, settings.widthMm / 4)}
-                        step={0.5}
-                        value={[settings.borderWidthMm]}
-                        onValueChange={([value]) =>
-                          updateSettings({ borderWidthMm: value })
-                        }
-                      />
-                    </div>
+                    <NumberSlider
+                      id="coaster-border-width"
+                      label="Ancho del borde"
+                      value={settings.borderWidthMm}
+                      min={1}
+                      max={Math.max(2, settings.widthMm / 4)}
+                      step={0.5}
+                      unit="mm"
+                      onChange={(value) =>
+                        updateSettings({ borderWidthMm: value })
+                      }
+                    />
                   ) : null}
                   {settings.borderEnabled ? (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs">Altura del borde</Label>
-                        <span className="text-[11px] tabular-nums text-muted-foreground">
-                          {settings.borderLayers} capas
-                        </span>
-                      </div>
-                      <Slider
-                        min={1}
-                        max={12}
-                        step={1}
-                        value={[settings.borderLayers]}
-                        onValueChange={([value]) =>
-                          updateSettings({ borderLayers: value })
-                        }
-                      />
-                    </div>
+                    <NumberSlider
+                      id="coaster-border-layers"
+                      label="Altura del borde"
+                      value={settings.borderLayers}
+                      min={1}
+                      max={12}
+                      step={1}
+                      unit="capas"
+                      decimals={0}
+                      onChange={(value) =>
+                        updateSettings({ borderLayers: value })
+                      }
+                    />
                   ) : null}
                 </div>
               </Panel>
@@ -1343,7 +1333,8 @@ export function PosavasoTool() {
             variant="ghost"
             size="sm"
             className="w-full text-muted-foreground"
-            onClick={() => setSettings(DEFAULT_COASTER_SETTINGS)}
+            title="Vuelve forma, tamaño y capas a los valores por defecto (no borra el diseño)"
+            onClick={handleReset}
           >
             Restablecer medidas
           </Button>
@@ -1360,6 +1351,88 @@ const PANEL_IDS = [
   "placement",
   "mosaic",
 ] as const;
+
+function NumberSlider({
+  id,
+  label,
+  value,
+  min,
+  max,
+  step,
+  unit,
+  decimals = 1,
+  onChange,
+  hint,
+}: {
+  id?: string;
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  unit?: string;
+  decimals?: number;
+  onChange: (value: number) => void;
+  hint?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const formatted = String(Number(value.toFixed(decimals)));
+  const display = editing ? draft : formatted;
+
+  const commit = () => {
+    setEditing(false);
+    const parsed = Number(draft);
+    if (Number.isNaN(parsed)) return;
+    onChange(Math.min(max, Math.max(min, parsed)));
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={id} className="text-xs">
+          {label}
+        </Label>
+        <div className="flex items-center gap-1">
+          <Input
+            id={id}
+            type="number"
+            inputMode="decimal"
+            min={min}
+            max={max}
+            step={step}
+            value={display}
+            onFocus={() => {
+              setDraft(formatted);
+              setEditing(true);
+            }}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+            className="h-7 w-16 px-1.5 text-right text-[11px] tabular-nums"
+          />
+          {unit ? (
+            <span className="text-[11px] text-muted-foreground">{unit}</span>
+          ) : null}
+        </div>
+      </div>
+      <Slider
+        min={min}
+        max={max}
+        step={step}
+        value={[value]}
+        aria-label={label}
+        onValueChange={([next]) => onChange(next)}
+      />
+      {hint ? (
+        <p className="text-[11px] text-muted-foreground">{hint}</p>
+      ) : null}
+    </div>
+  );
+}
 
 function Panel({
   id,

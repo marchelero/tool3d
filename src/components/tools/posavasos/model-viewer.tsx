@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowDown,
+  Box,
   Grid3x3,
   Maximize2,
   Minimize2,
@@ -34,6 +35,7 @@ interface ModelViewerProps {
   meshes: MeshPiece[];
   widthMm: number;
   heightMm: number;
+  designMm?: number;
   expanded?: boolean;
   onToggleExpanded?: () => void;
   className?: string;
@@ -48,6 +50,7 @@ export function ModelViewer({
   meshes,
   widthMm,
   heightMm,
+  designMm = 0,
   expanded = false,
   onToggleExpanded,
   className,
@@ -58,11 +61,14 @@ export function ModelViewer({
   const controlsRef = useRef<OrbitControls | null>(null);
   const modelRef = useRef<Group | null>(null);
   const gridRef = useRef<GridHelper | null>(null);
+  const materialsRef = useRef<MeshStandardMaterial[]>([]);
+  const wireframeRef = useRef(false);
   const fitRef = useRef<FitState | null>(null);
   const lastFitSizeRef = useRef<Vector3 | null>(null);
 
   const [showGrid, setShowGrid] = useState(true);
   const [autoRotate, setAutoRotate] = useState(false);
+  const [wireframe, setWireframe] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -185,6 +191,13 @@ export function ModelViewer({
     if (controls) controls.autoRotate = autoRotate;
   }, [autoRotate]);
 
+  useEffect(() => {
+    wireframeRef.current = wireframe;
+    for (const material of materialsRef.current) {
+      material.wireframe = wireframe;
+    }
+  }, [wireframe]);
+
   const applyView = useCallback((mode: "iso" | "top" | "front") => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
@@ -237,6 +250,7 @@ export function ModelViewer({
       }
     }
 
+    materialsRef.current = [];
     for (const piece of meshes) {
       const material = new MeshStandardMaterial({
         color: piece.hex,
@@ -244,7 +258,9 @@ export function ModelViewer({
         metalness: 0.04,
         side: DoubleSide,
         flatShading: false,
+        wireframe: wireframeRef.current,
       });
+      materialsRef.current.push(material);
       const mesh = new Mesh(piece.geometry, material);
       mesh.name = piece.name;
       model.add(mesh);
@@ -316,11 +332,18 @@ export function ModelViewer({
           <Scan className="size-4" />
         </ViewerButton>
         <ViewerButton
-          label={showGrid ? "Ocultar cuadrícula" : "Mostrar cuadrícula"}
+          label={showGrid ? "Ocultar cuadrícula (10 mm)" : "Mostrar cuadrícula (10 mm)"}
           active={showGrid}
           onClick={() => setShowGrid((value) => !value)}
         >
           <Grid3x3 className="size-4" />
+        </ViewerButton>
+        <ViewerButton
+          label={wireframe ? "Ver sólido" : "Ver alambre"}
+          active={wireframe}
+          onClick={() => setWireframe((value) => !value)}
+        >
+          <Box className="size-4" />
         </ViewerButton>
         <ViewerButton
           label={
@@ -333,9 +356,10 @@ export function ModelViewer({
         </ViewerButton>
       </div>
 
-      <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
-        {Math.round(widthMm * 10) / 10} mm · {Math.round(heightMm * 100) / 100}{" "}
-        mm de alto
+      <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-background/80 px-2 py-1 text-[11px] tabular-nums text-muted-foreground backdrop-blur">
+        Ancho {Math.round(widthMm * 10) / 10} mm · Alto{" "}
+        {Math.round(heightMm * 100) / 100} mm
+        {designMm > 0 ? ` · Diseño ${Math.round(designMm * 10) / 10} mm` : ""}
       </div>
       <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
         Arrastra para girar · rueda o botones para acercar

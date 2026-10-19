@@ -423,31 +423,54 @@ export function buildCoaster(
     const bandRegion = invert
       ? difference(baseRings, network)
       : difference(baseRings, design);
-    const colorZBottom = raise ? totalHeightMm : bandZ;
-    const colorZTop = raise ? totalHeightMm + bandMm : bandZ + bandMm;
+    let colorZBottom: number;
+    let colorZTop: number;
 
     if (raise) {
-      levels = [
-        { z: 0, region: baseRings },
-        { z: totalHeightMm, region: baseRings },
-      ];
-    } else if (set.placement === "bottom") {
-      levels = [
-        { z: 0, region: bandRegion },
-        { z: bandMm, region: baseRings },
-        { z: totalHeightMm, region: baseRings },
-      ];
-    } else if (set.placement === "full") {
-      levels = [
-        { z: 0, region: bandRegion },
-        { z: totalHeightMm, region: bandRegion },
-      ];
+      // En relieve el color sobresale de una cara: la ubicación elige cuál.
+      if (set.placement === "full") {
+        colorZBottom = 0;
+        colorZTop = totalHeightMm;
+        levels = [
+          { z: 0, region: bandRegion },
+          { z: totalHeightMm, region: bandRegion },
+        ];
+      } else if (set.placement === "bottom") {
+        colorZBottom = -bandMm;
+        colorZTop = 0;
+        levels = [
+          { z: 0, region: baseRings },
+          { z: totalHeightMm, region: baseRings },
+        ];
+      } else {
+        colorZBottom = totalHeightMm;
+        colorZTop = totalHeightMm + bandMm;
+        levels = [
+          { z: 0, region: baseRings },
+          { z: totalHeightMm, region: baseRings },
+        ];
+      }
     } else {
-      levels = [
-        { z: 0, region: baseRings },
-        { z: bandZ, region: bandRegion },
-        { z: totalHeightMm, region: bandRegion },
-      ];
+      colorZBottom = bandZ;
+      colorZTop = bandZ + bandMm;
+      if (set.placement === "bottom") {
+        levels = [
+          { z: 0, region: bandRegion },
+          { z: bandMm, region: baseRings },
+          { z: totalHeightMm, region: baseRings },
+        ];
+      } else if (set.placement === "full") {
+        levels = [
+          { z: 0, region: bandRegion },
+          { z: totalHeightMm, region: bandRegion },
+        ];
+      } else {
+        levels = [
+          { z: 0, region: baseRings },
+          { z: bandZ, region: bandRegion },
+          { z: totalHeightMm, region: bandRegion },
+        ];
+      }
     }
 
     if (invert) {
