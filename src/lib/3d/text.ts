@@ -7,17 +7,21 @@ export interface KeychainFont {
   file: string;
 }
 
+// Prefijo del sitio cuando se publica bajo un subdirectorio (GitHub Pages).
+// En local es "" (sirve desde la raíz).
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
 export const KEYCHAIN_FONTS: KeychainFont[] = [
-  { id: "lato-black", label: "Lato (gruesa)", file: "/fonts/lato-black.ttf" },
-  { id: "poppins-bold", label: "Poppins (moderna)", file: "/fonts/poppins-bold.ttf" },
-  { id: "varelaround", label: "Varela Round (redondeada)", file: "/fonts/varelaround.ttf" },
-  { id: "anton", label: "Anton (impacto)", file: "/fonts/anton.ttf" },
-  { id: "bebas", label: "Bebas Neue (alta)", file: "/fonts/bebas.ttf" },
-  { id: "bungee", label: "Bungee (bloque)", file: "/fonts/bungee.ttf" },
-  { id: "righteous", label: "Righteous (retro)", file: "/fonts/righteous.ttf" },
-  { id: "alfaslab", label: "Alfa Slab (serif)", file: "/fonts/alfaslab.ttf" },
-  { id: "lobster", label: "Lobster (cursiva)", file: "/fonts/lobster.ttf" },
-  { id: "pacifico", label: "Pacifico (caligráfica)", file: "/fonts/pacifico.ttf" },
+  { id: "lato-black", label: "Lato (gruesa)", file: `${BASE_PATH}/fonts/lato-black.ttf` },
+  { id: "poppins-bold", label: "Poppins (moderna)", file: `${BASE_PATH}/fonts/poppins-bold.ttf` },
+  { id: "varelaround", label: "Varela Round (redondeada)", file: `${BASE_PATH}/fonts/varelaround.ttf` },
+  { id: "anton", label: "Anton (impacto)", file: `${BASE_PATH}/fonts/anton.ttf` },
+  { id: "bebas", label: "Bebas Neue (alta)", file: `${BASE_PATH}/fonts/bebas.ttf` },
+  { id: "bungee", label: "Bungee (bloque)", file: `${BASE_PATH}/fonts/bungee.ttf` },
+  { id: "righteous", label: "Righteous (retro)", file: `${BASE_PATH}/fonts/righteous.ttf` },
+  { id: "alfaslab", label: "Alfa Slab (serif)", file: `${BASE_PATH}/fonts/alfaslab.ttf` },
+  { id: "lobster", label: "Lobster (cursiva)", file: `${BASE_PATH}/fonts/lobster.ttf` },
+  { id: "pacifico", label: "Pacifico (caligráfica)", file: `${BASE_PATH}/fonts/pacifico.ttf` },
 ];
 
 /** Prefijo de los ids que representan una fuente del sistema (Local Font Access API). */
