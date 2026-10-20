@@ -18,6 +18,7 @@
     "class-variance-authority": "^0.7.1",
     "clipper-lib": "^6.4.2",
     "cn": "^0.5.0",
+    "esm-potrace-wasm": "^0.5.1",
     "fflate": "^0.8.3",
     "imagetracerjs": "^1.2.6",
     "jszip": "^3.10.2",

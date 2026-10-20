@@ -1,4 +1,6 @@
 import ImageTracer, { type TraceOptions } from "imagetracerjs";
+import { straightenSvgPaths } from "./straighten";
+import { traceImageWithPotrace } from "./potrace";
 
 export type TraceMode =
   | "color"
@@ -7,7 +9,10 @@ export type TraceMode =
   | "negative"
   | "grayscale";
 
+export type TraceEngine = "fast" | "hq";
+
 export interface TraceSettings {
+  engine: TraceEngine;
   mode: TraceMode;
   numberofcolors: number;
   pathomit: number;
@@ -20,9 +25,11 @@ export interface TraceSettings {
   alphaThreshold: number;
   removeBackground: boolean;
   backgroundTolerance: number;
+  straighten: boolean;
 }
 
 export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
+  engine: "hq",
   mode: "color",
   numberofcolors: 8,
   pathomit: 8,
@@ -35,15 +42,22 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
   alphaThreshold: 128,
   removeBackground: true,
   backgroundTolerance: 20,
+  straighten: false,
 };
 
-export type TracePreset = "logo" | "detailed" | "illustration" | "silhouette";
+export type TracePreset =
+  | "logo"
+  | "detailed"
+  | "illustration"
+  | "silhouette"
+  | "straight";
 
 export const TRACE_PRESET_LABELS: Record<TracePreset, string> = {
   logo: "Logo",
   detailed: "Detallado",
   illustration: "Ilustración",
   silhouette: "Silueta",
+  straight: "Trazos rectos",
 };
 
 export const TRACE_PRESETS: Record<TracePreset, Partial<TraceSettings>> = {
@@ -55,6 +69,7 @@ export const TRACE_PRESETS: Record<TracePreset, Partial<TraceSettings>> = {
     blurradius: 0,
     blurdelta: 64,
     strokewidth: 1,
+    straighten: false,
   },
   detailed: {
     fidelity: 0.15,
@@ -64,6 +79,7 @@ export const TRACE_PRESETS: Record<TracePreset, Partial<TraceSettings>> = {
     blurradius: 0,
     blurdelta: 64,
     strokewidth: 0,
+    straighten: false,
   },
   illustration: {
     fidelity: 0.7,
@@ -73,6 +89,7 @@ export const TRACE_PRESETS: Record<TracePreset, Partial<TraceSettings>> = {
     blurradius: 3,
     blurdelta: 96,
     strokewidth: 1,
+    straighten: false,
   },
   silhouette: {
     fidelity: 1.5,
@@ -82,6 +99,17 @@ export const TRACE_PRESETS: Record<TracePreset, Partial<TraceSettings>> = {
     blurradius: 4,
     blurdelta: 160,
     strokewidth: 0,
+    straighten: false,
+  },
+  straight: {
+    fidelity: 1.5,
+    pathomit: 4,
+    roundcoords: 1,
+    rightangleenhance: true,
+    blurradius: 1,
+    blurdelta: 96,
+    strokewidth: 1,
+    straighten: true,
   },
 };
 
@@ -567,8 +595,27 @@ export function tracePreparedImage(
   prepared: ImageData,
   settings: TraceSettings
 ): string {
-  const svg = ImageTracer.imagedataToSVG(prepared, buildOptions(settings, prepared));
+  const raw = ImageTracer.imagedataToSVG(prepared, buildOptions(settings, prepared));
+  const svg = settings.straighten
+    ? straightenSvgPaths(raw, { roundcoords: settings.roundcoords })
+    : raw;
   return stripBackgroundPaths(svg);
+}
+
+export async function tracePreparedImageAsync(
+  prepared: ImageData,
+  settings: TraceSettings
+): Promise<string> {
+  if (settings.engine === "hq") {
+    const raw = await traceImageWithPotrace(prepared, {
+      colors: settings.numberofcolors,
+    });
+    const svg = settings.straighten
+      ? straightenSvgPaths(raw, { roundcoords: settings.roundcoords })
+      : raw;
+    return stripBackgroundPaths(svg);
+  }
+  return tracePreparedImage(prepared, settings);
 }
 
 export interface ColorLayer {

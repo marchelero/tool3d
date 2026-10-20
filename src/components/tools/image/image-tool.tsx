@@ -76,7 +76,7 @@ import {
   prepareTraceImageData,
   rgbToHex,
   splitSvgByColor,
-  tracePreparedImage,
+  tracePreparedImageAsync,
   TRACE_PRESET_LABELS,
   TRACE_PRESETS,
   type ColorLayer,
@@ -225,15 +225,15 @@ function formatPhysical(px: number, dpi: number, unit: SizeUnit): string {
   return `${value.toFixed(digits)} ${UNIT_LABEL[unit]}`;
 }
 
-function computeTrace(
+async function computeTrace(
   canvas: HTMLCanvasElement,
   settings: TraceSettings
-): TraceResult | null {
+): Promise<TraceResult | null> {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return null;
   const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const prepared = prepareTraceImageData(data, settings);
-  const svg = tracePreparedImage(prepared, settings);
+  const svg = await tracePreparedImageAsync(prepared, settings);
   if (!/<path\b/.test(svg)) return null;
   return { svg, width: prepared.width, height: prepared.height };
 }
@@ -924,14 +924,15 @@ export function ImageTool() {
   useEffect(() => {
     if (tab === "background" || !workCanvas) return;
     let cancelled = false;
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       if (cancelled) return;
       let result: TraceResult | null = null;
       try {
-        result = computeTrace(workCanvas, traceSettings);
+        result = await computeTrace(workCanvas, traceSettings);
       } catch (error) {
         console.error(error);
       }
+      if (cancelled) return;
       setTraceState({ key: traceKey, result });
     }, TRACE_DEBOUNCE_MS);
     return () => {
@@ -1961,6 +1962,43 @@ export function ImageTool() {
 
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
+                        <Label>Motor</Label>
+                        <span className="text-xs text-muted-foreground">
+                          {traceSettings.engine === "hq" ? "Alta definición" : "Rápido"}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={traceSettings.engine === "fast" ? "default" : "outline"}
+                          aria-pressed={traceSettings.engine === "fast"}
+                          onClick={() =>
+                            updateTraceSettings((settings) => ({ ...settings, engine: "fast" }))
+                          }
+                        >
+                          Rápido
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={traceSettings.engine === "hq" ? "default" : "outline"}
+                          aria-pressed={traceSettings.engine === "hq"}
+                          onClick={() =>
+                            updateTraceSettings((settings) => ({ ...settings, engine: "hq" }))
+                          }
+                        >
+                          Alta definición
+                        </Button>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        Alta definición (Potrace) produce curvas más limpias, ideal para logos y
+                        dibujos de pocos colores. Rápido usa el motor anterior.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
                         <Label>Fidelidad de curvas</Label>
                         <span className="text-xs tabular-nums text-muted-foreground">
                           {traceSettings.fidelity.toFixed(2)}
@@ -2137,10 +2175,28 @@ export function ImageTool() {
                       >
                         Sellar costuras
                       </Button>
+                      <Button
+                        size="sm"
+                        className="col-span-2"
+                        variant={
+                          traceSettings.straighten ? "default" : "outline"
+                        }
+                        aria-pressed={traceSettings.straighten}
+                        onClick={() =>
+                          updateTraceSettings((settings) => ({
+                            ...settings,
+                            straighten: !settings.straighten,
+                          }))
+                        }
+                      >
+                        Enderezar trazos
+                      </Button>
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                       Ángulos rectos fuerza esquinas a 90° (útil en planos).
                       Sellar costuras tapa las líneas blancas entre colores.
+                      Enderezar trazos convierte las líneas casi rectas en
+                      rectas exactas (ideal para dibujos con trazos rectos).
                     </p>
                   </div>
 

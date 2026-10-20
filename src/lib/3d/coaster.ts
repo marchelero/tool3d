@@ -397,13 +397,19 @@ export function buildCoaster(
     const placedAll: Ring[] = [];
     const placedPerLayer: Ring[][] = [];
     for (const layer of designLayers) {
-      const placed = transformRings(
+      const placedRaw = transformRings(
         layer.contours,
         scale,
         offsetX,
         offsetY,
         rotation
       );
+      const placed =
+        set.placement === "bottom"
+          ? placedRaw.map((ring) =>
+              ring.map(([x, y]) => [-x, y] as [number, number])
+            )
+          : placedRaw;
       placedPerLayer.push(placed);
       placedAll.push(...placed);
     }

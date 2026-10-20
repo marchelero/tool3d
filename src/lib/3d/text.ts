@@ -209,8 +209,19 @@ function lineToSvg(
   sizeMm: number,
   letterSpacingMm: number
 ): string {
-  const d = buildLinePath(font, text, x, baseline, sizeMm, letterSpacingMm).path.toPathData(3);
-  return `<svg xmlns="http://www.w3.org/2000/svg"><path d="${d}"/></svg>`;
+  const path = buildLinePath(font, text, x, baseline, sizeMm, letterSpacingMm).path;
+  // opentype trabaja con Y hacia arriba y el SVG con Y hacia abajo: se invierte
+  // para que el texto no salga reflejado (la imagen de Potrace ya viene bien).
+  for (const command of path.commands) {
+    if (typeof command.y === "number") command.y = -command.y;
+    if (typeof command.y1 === "number") command.y1 = -command.y1;
+    if (typeof command.y2 === "number") command.y2 = -command.y2;
+  }
+  const d = path.toPathData(3);
+  const box = path.getBoundingBox();
+  const width = Math.max(0.001, box.x2 - box.x1);
+  const height = Math.max(0.001, box.y2 - box.y1);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><path d="${d}"/></svg>`;
 }
 
 /**
