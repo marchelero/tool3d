@@ -3,9 +3,9 @@
 ## Resumen
 
 Toolkit web modular de utilidades para **impresión 3D**. Arranca con herramientas
-de imagen, suma generación paramétrica de **posavasos 3D** y está diseñado para
-crecer agregando nuevas herramientas (llaveros, generación 3D, calibración, etc.)
-sin tocar el núcleo.
+de imagen, suma generación paramétrica de **posavasos 3D**, **llaveros** y
+**texturizado de STL por desplazamiento**, y está diseñado para crecer agregando
+nuevas herramientas sin tocar el núcleo.
 
 ## Objetivo
 
@@ -21,7 +21,9 @@ sin costo de servidor.
 - Procesamiento de imagen en el navegador: Canvas + `imagetracerjs` +
   `@imgly/background-removal`
 - Geometría 3D: **`@jscad/modeling`** + serializers STL/3MF
-- Visor 3D: **Three.js** (`OrbitControls`)
+- Visor 3D: **Three.js** (`OrbitControls`, `STLLoader`)
+- Texturizado STL: subdivisión y desplazamiento en **Web Worker**, texturas
+  procedurales locales
 - **npm** como package manager
 - Deploy objetivo: **Vercel** (sitio estático; sin API por ahora)
 - Sin secretos, sin `.env`, sin backend
@@ -32,8 +34,9 @@ sin costo de servidor.
    `src/app/tools/<slug>/` + su componente en `src/components/tools/<slug>/`.
 2. **Registro central**: `src/lib/tools/registry.ts` es la fuente de verdad del
    catálogo de la home. Agregar una tool = agregar una entrada.
-3. **Lógica pura separada de UI**: el procesamiento vive en `src/lib/image/*` y
-   `src/lib/3d/*` como funciones sin dependencias de React.
+3. **Lógica pura separada de UI**: el procesamiento vive en `src/lib/image/*`,
+   `src/lib/3d/*` y `src/lib/texturizer/*` como funciones sin dependencias de
+   React.
 4. **Client-only cuando aplica**: las libs pesadas (IA de fondo, tracer,
    serializers, ZIP) se cargan con `dynamic import`.
 5. **Sin secretos en el cliente**: no hay claves API; todo el cómputo es local.
@@ -56,6 +59,7 @@ src/
     tools/registry.ts       # catálogo central
     image/                  # procesamiento de imagen (puro)
     3d/                     # SVG → geometría, patrones, posavasos, malla, handoff
+    texturizer/             # STL, subdivisión, texturas, desplazamiento, worker
   types/                    # .d.ts de librerías sin tipos
 docs/                       # PRD, arquitectura, decisiones, troubleshooting, sesión
 ```
@@ -65,8 +69,9 @@ docs/                       # PRD, arquitectura, decisiones, troubleshooting, se
 | Slug | Nombre | Categoría | Estado |
 |------|--------|-----------|--------|
 | `image` | Imagen | imagen | ✅ disponible |
+| `llavero` | Llavero | 3d | ✅ disponible |
 | `posavasos` | Posavasos | 3d | ✅ disponible |
-| `llavero` | Llavero con imagen | 3d | ⚠️ ruta placeholder (registry dice disponible) |
+| `texturizador` | Texturizador STL | 3d | ✅ disponible |
 | `keychain` | Llaveros con nombres | 3d | ⏳ próximamente |
 | `generate-3d` | Generar 3D | 3d | ⏳ próximamente |
 | `calibration` | Calibración | utilidades | ⏳ próximamente |
@@ -78,16 +83,16 @@ docs/                       # PRD, arquitectura, decisiones, troubleshooting, se
 |------|-----------|--------|
 | 1 | Infra + **herramientas de imagen** (quitar fondo, retoque, PNG, SVG, split por color) | ✅ |
 | 2 | Generador de **llaveros con nombres** (letras → SVG/STL) | ⏳ (ruta `llavero` placeholder) |
-| 3 | Generación/edición 3D + export STL/3MF (**posavasos paramétrico**) | ✅ mayormente |
-| 4 | Más utilidades (calibración, presets de impresión, calculadoras, cajas) | ⏳ |
+| 3 | Generación/edición 3D + export STL/3MF (**posavasos paramétrico**, **llavero**) | ✅ |
+| 4 | **Texturizador STL** (desplazamiento por textura y máscara por ángulo) | ✅ MVP |
+| 5 | Más utilidades (calibración, presets de impresión, calculadoras, cajas) | ⏳ |
 
 ## Estado actual
 
-- Home + herramienta de imagen + posavasos 3D funcionales.
+- Home + herramientas de imagen, posavasos, llavero y texturizador STL
+  funcionales.
 - `npm run lint` y `npm run build` pasan.
-- Sin tests automatizados.
-- Refactor de geometría (booleanos 2D validados, sin booleanos 3D) **sin
-  commitear** al momento de esta actualización.
+- Sin tests automatizados (verificación manual/E2E temporal).
 - Detalle de continuidad en `docs/SESSION.md`.
 
 ## Documentación

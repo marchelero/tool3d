@@ -234,6 +234,15 @@ export function buildKeychain(
   let offsetY = 0;
 
   if (silhouette && hasDesign && bounds) {
+    const rawW = Math.max(0.001, bounds.maxX - bounds.minX);
+    const rawH = Math.max(0.001, bounds.maxY - bounds.minY);
+    const cosR = Math.abs(Math.cos(rotation));
+    const sinR = Math.abs(Math.sin(rotation));
+    const rotW = rawW * cosR + rawH * sinR;
+    const rotH = rawW * sinR + rawH * cosR;
+    const offsetMm = Math.max(0.5, settings.silhouetteOffsetMm);
+    const target = Math.max(1, settings.widthMm - offsetMm * 2);
+    scale = (target / Math.max(rotW, rotH)) * userScale;
     const cx = (bounds.minX + bounds.maxX) / 2;
     const cy = (bounds.minY + bounds.maxY) / 2;
     offsetX = -cx * scale;
@@ -241,7 +250,7 @@ export function buildKeychain(
     const placed = designLayers.flatMap((layer) =>
       transformRings(layer.contours, scale, offsetX, offsetY, rotation)
     );
-    baseRings = offset(unionSolid(placed), Math.max(0.5, settings.silhouetteOffsetMm), "round");
+    baseRings = offset(unionSolid(placed), offsetMm, "round");
   } else {
     baseRings = buildShapeRings(silhouette ? "round" : settings.shape, shapeParams);
   }

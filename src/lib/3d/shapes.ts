@@ -148,25 +148,35 @@ function heartRing(rx: number, ry: number, segments: number): Ring {
 
 function shieldRing(hw: number, hh: number, segments: number): Ring {
   const points: Ring = [];
-  const shoulder = 0.42;
+  const shoulder = 0.45;
+
+  const halfWidth = (t: number) => {
+    if (t <= shoulder) return hw;
+    const fall = (t - shoulder) / (1 - shoulder);
+    return hw * Math.pow(1 - fall, 0.72);
+  };
+
   for (let index = 0; index <= segments; index += 1) {
     const t = index / segments;
-    const y = -hh + t * 2 * hh;
-    const x = t <= shoulder ? hw : hw * Math.pow(1 - (t - shoulder) / (1 - shoulder), 0.72);
-    points.push([x, y]);
+    points.push([halfWidth(t), hh - t * 2 * hh]);
   }
-  for (let index = 0; index <= segments; index += 1) {
+  for (let index = 1; index <= segments; index += 1) {
     const t = index / segments;
-    const y = hh - t * 2 * hh;
-    const x = t <= shoulder ? -hw : -hw * Math.pow(1 - (t - shoulder) / (1 - shoulder), 0.72);
-    points.push([x, y]);
+    points.push([-halfWidth(1 - t), -hh + t * 2 * hh]);
   }
+
   return points;
 }
 
 function rawShapeRing(shape: KeychainShape, params: ShapeParams): Ring {
   const width = Math.max(4, params.widthMm);
-  const height = shape === "rectangle" ? Math.max(4, params.heightMm) : width;
+  const usesHeight =
+    shape === "rectangle" ||
+    shape === "diamond" ||
+    shape === "star" ||
+    shape === "heart" ||
+    shape === "shield";
+  const height = usesHeight ? Math.max(4, params.heightMm) : width;
   const hw = width / 2;
   const hh = height / 2;
 

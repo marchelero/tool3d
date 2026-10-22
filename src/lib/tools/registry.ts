@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Boxes,
   Coffee,
+  Grid3x3,
   Image as ImageIcon,
   KeyRound,
   Ruler,
@@ -77,6 +78,24 @@ export const TOOLS: ToolDefinition[] = [
     status: "available",
     icon: Coffee,
     tags: ["posavasos", "relieve", "circular", "svg"],
+  },
+  {
+    slug: "texturizador",
+    name: "Texturizador",
+    description:
+      "Cargá un STL y agregá texturas físicas de relieve con máscaras, proyección y exportación lista para imprimir.",
+    category: "3d",
+    status: "available",
+    icon: Grid3x3,
+    tags: ["stl", "textura", "relieve", "displacement", "3d"],
+    features: [
+      "Importar STL binario o ASCII",
+      "12 texturas procedurales sin costuras",
+      "Mapa de desplazamiento propio",
+      "Proyección triplanar y planos XY/XZ/YZ",
+      "Máscara por ángulo y base de apoyo",
+      "Exportar STL binario",
+    ],
   },
   {
     slug: "generate-3d",

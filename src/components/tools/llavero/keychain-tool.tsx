@@ -579,13 +579,15 @@ export function KeychainTool() {
   const showsDesign = designKind !== "none";
 
   const widthLabel =
-    settings.shape === "round" ||
-    settings.shape === "hex" ||
-    settings.shape === "oct"
-      ? "Diámetro"
-      : settings.shape === "square"
-        ? "Lado"
-        : "Ancho";
+    settings.shape === "silhouette"
+      ? "Tamaño"
+      : settings.shape === "round" ||
+          settings.shape === "hex" ||
+          settings.shape === "oct"
+        ? "Diámetro"
+        : settings.shape === "square"
+          ? "Lado"
+          : "Ancho";
   const hasHeight = HEIGHT_SHAPES.includes(settings.shape);
   const designModeLabel =
     DESIGN_MODES.find((mode) => mode.value === settings.designMode)?.label ??
@@ -807,7 +809,7 @@ export function KeychainTool() {
                 <Hint>
                   {SHAPE_LABELS[settings.shape]}
                   {settings.shape === "silhouette"
-                    ? " · la forma sigue el contorno de la imagen."
+                    ? " · sigue el contorno de la imagen y se ajusta al tamaño."
                     : null}
                 </Hint>
               </div>
@@ -824,44 +826,33 @@ export function KeychainTool() {
                 onChange={(value) => updateSettings({ widthMm: value })}
               />
 
-              <div className="space-y-1.5">
-                <GroupLabel>Tamaños rápidos</GroupLabel>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {SIZE_PRESETS.map((preset) => {
-                    const active = Math.round(settings.widthMm) === preset;
-                    return (
-                      <button
-                        key={preset}
-                        type="button"
-                        title={`${preset} mm`}
-                        aria-label={`${preset} mm`}
-                        aria-pressed={active}
-                        onClick={() => updateSettings({ widthMm: preset })}
-                        className={`h-7 rounded-md border text-[11px] tabular-nums transition-colors ${
-                          active
-                            ? "border-primary/60 bg-primary/10 text-primary"
-                            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
-                        }`}
-                      >
-                        {preset} mm
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              <QuickSizes
+                label={widthLabel}
+                value={settings.widthMm}
+                presets={SIZE_PRESETS}
+                onChange={(value) => updateSettings({ widthMm: value })}
+              />
 
               {hasHeight ? (
-                <NumberSlider
-                  id="keychain-height"
-                  label="Alto"
-                  value={settings.heightMm}
-                  min={20}
-                  max={120}
-                  step={1}
-                  unit="mm"
-                  decimals={0}
-                  onChange={(value) => updateSettings({ heightMm: value })}
-                />
+                <>
+                  <NumberSlider
+                    id="keychain-height"
+                    label="Alto"
+                    value={settings.heightMm}
+                    min={20}
+                    max={120}
+                    step={1}
+                    unit="mm"
+                    decimals={0}
+                    onChange={(value) => updateSettings({ heightMm: value })}
+                  />
+                  <QuickSizes
+                    label="Alto"
+                    value={settings.heightMm}
+                    presets={SIZE_PRESETS}
+                    onChange={(value) => updateSettings({ heightMm: value })}
+                  />
+                </>
               ) : null}
 
               {settings.shape === "square" ||
@@ -1694,6 +1685,46 @@ function NumberSlider({
       {hint ? (
         <p className="text-[11px] text-muted-foreground">{hint}</p>
       ) : null}
+    </div>
+  );
+}
+
+function QuickSizes({
+  label,
+  value,
+  presets,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  presets: readonly number[];
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <GroupLabel>Tamaños rápidos</GroupLabel>
+      <div className="grid grid-cols-4 gap-1.5">
+        {presets.map((preset) => {
+          const active = Math.round(value) === preset;
+          return (
+            <button
+              key={preset}
+              type="button"
+              title={`${label} ${preset} mm`}
+              aria-label={`${label} ${preset} mm`}
+              aria-pressed={active}
+              onClick={() => onChange(preset)}
+              className={`h-7 rounded-md border text-[11px] tabular-nums transition-colors ${
+                active
+                  ? "border-primary/60 bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              {preset} mm
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
