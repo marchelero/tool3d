@@ -1,6 +1,7 @@
 import ImageTracer, { type TraceOptions } from "imagetracerjs";
 import { straightenSvgPaths } from "./straighten";
 import { traceImageWithPotrace } from "./potrace";
+import { collectSvgShapes, filterSvgShapes, removeEmptyGroups } from "./svg";
 
 export type TraceMode =
   | "color"
@@ -625,9 +626,6 @@ export interface ColorLayer {
   pathCount: number;
 }
 
-const PATH_REGEX = /<path\b[^>]*\/?>(?:<\/path>)?/g;
-const FILL_REGEX = /fill="(rgb\([^)]+\)|#[0-9a-fA-F]{3,8})"/;
-
 function stripStroke(path: string): string {
   return path
     .replace(/\sstroke="[^"]*"/g, "")
@@ -660,13 +658,9 @@ function isBackgroundColor(color: string): boolean {
 }
 
 export function stripBackgroundPaths(svg: string): string {
-  return svg.replace(PATH_REGEX, (path) => {
-    const match = path.match(FILL_REGEX);
-    if (match && isBackgroundColor(match[1])) {
-      return "";
-    }
-    return path;
-  });
+  return removeEmptyGroups(
+    filterSvgShapes(svg, (fill) => fill === null || !isBackgroundColor(fill))
+  );
 }
 
 export function filterSvgByColors(
@@ -674,11 +668,12 @@ export function filterSvgByColors(
   excluded: ReadonlySet<string>
 ): string {
   if (excluded.size === 0) return svg;
-  return svg.replace(PATH_REGEX, (path) => {
-    const match = path.match(FILL_REGEX);
-    if (!match) return path;
-    return excluded.has(rgbToHex(parseRgb(match[1]))) ? "" : path;
-  });
+  return removeEmptyGroups(
+    filterSvgShapes(svg, (fill) => {
+      const color = fill ?? "rgb(0,0,0)";
+      return !excluded.has(rgbToHex(parseRgb(color)));
+    })
+  );
 }
 
 export function rgbToHex({ r, g, b }: { r: number; g: number; b: number }): string {
@@ -690,29 +685,35 @@ export function rgbToHex({ r, g, b }: { r: number; g: number; b: number }): stri
 }
 
 export function splitSvgByColor(svg: string, width: number, height: number): ColorLayer[] {
-  const paths = svg.match(PATH_REGEX) ?? [];
-  const groups = new Map<string, string[]>();
+  const groups = new Map<
+    string,
+    { color: string; rgb: { r: number; g: number; b: number }; paths: string[] }
+  >();
 
-  for (const path of paths) {
-    const match = path.match(FILL_REGEX);
-    const color = match ? match[1] : "rgb(0,0,0)";
-    if (isBackgroundColor(color)) {
-      continue;
-    }
-    const clean = stripStroke(path);
-    const list = groups.get(color) ?? [];
-    list.push(clean);
-    groups.set(color, list);
+  for (const shape of collectSvgShapes(svg)) {
+    const color = shape.fill ?? "rgb(0,0,0)";
+    if (isBackgroundColor(color)) continue;
+    const key = rgbToHex(parseRgb(color));
+    const group = groups.get(key) ?? {
+      color,
+      rgb: parseRgb(color),
+      paths: [],
+    };
+    const open = shape.groups
+      .map((attrs) => `<g${attrs ? ` ${attrs}` : ""}>`)
+      .join("");
+    const close = shape.groups.map(() => "</g>").join("");
+    group.paths.push(`${open}${stripStroke(shape.markup)}${close}`);
+    groups.set(key, group);
   }
 
   const layers: ColorLayer[] = [];
-  for (const [color, list] of groups.entries()) {
-    const pathsMarkup = list.join("");
+  for (const { color, rgb, paths } of groups.values()) {
     layers.push({
       color,
-      rgb: parseRgb(color),
-      pathCount: list.length,
-      svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${pathsMarkup}</svg>`,
+      rgb,
+      pathCount: paths.length,
+      svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${paths.join("")}</svg>`,
     });
   }
 

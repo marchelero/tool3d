@@ -1,4 +1,5 @@
 import { init, potrace } from "esm-potrace-wasm";
+import { filterSvgShapes, removeEmptyGroups } from "./svg";
 
 let ready: Promise<void> | null = null;
 
@@ -102,27 +103,12 @@ function colorIsBackground(raw: string): boolean {
   return false;
 }
 
-function elementFill(element: string): string | null {
-  const attr = element.match(/\sfill="([^"]*)"/i);
-  if (attr) return attr[1];
-  const style = element.match(/style="([^"]*)"/i);
-  if (style) {
-    const fromStyle = style[1].match(/fill\s*:\s*([^;"]+)/i);
-    if (fromStyle) return fromStyle[1];
-  }
-  return null;
-}
-
-const ELEMENT_TAG = /<(rect|path)\b[^>]*\/?>(?:<\/\1>)?/gi;
-
 function stripBackgroundElements(svg: string): string {
-  const withoutRects = svg.replace(/<rect\b[^>]*\/?>(?:<\/rect>)?/gi, "");
-  return withoutRects.replace(ELEMENT_TAG, (element, tag: string) => {
-    if (tag.toLowerCase() === "rect") return "";
-    const fill = elementFill(element);
-    if (fill === null) return element;
-    return colorIsBackground(fill) ? "" : element;
-  });
+  return removeEmptyGroups(
+    filterSvgShapes(svg, (fill) =>
+      fill === null ? true : !colorIsBackground(fill)
+    )
+  );
 }
 
 export async function traceImageWithPotrace(

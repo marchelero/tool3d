@@ -17,8 +17,10 @@ interface EditorCanvasProps {
   tolerance: number;
   enabled: boolean;
   version: number;
+  compare?: boolean;
   cropActive?: boolean;
   cropRect?: Rect | null;
+  cropAspect?: number | null;
   onCropRectChange?: (rect: Rect | null) => void;
   onStroke: (entry: HistoryEntry) => void;
 }
@@ -43,8 +45,10 @@ export function EditorCanvas({
   tolerance,
   enabled,
   version,
+  compare = false,
   cropActive = false,
   cropRect = null,
+  cropAspect = null,
   onCropRectChange,
   onStroke,
 }: EditorCanvasProps) {
@@ -63,7 +67,11 @@ export function EditorCanvas({
     if (!ctx) return;
 
     ctx.clearRect(0, 0, display.width, display.height);
-    ctx.drawImage(workCanvas, 0, 0);
+    ctx.drawImage(
+      compare && originalCanvas ? originalCanvas : workCanvas,
+      0,
+      0
+    );
     const lineWidth = Math.max(1, display.width / 600);
 
     const hover = hoverRef.current;
@@ -102,7 +110,16 @@ export function EditorCanvas({
       ctx.strokeRect(rx, ry, rw, rh);
       ctx.restore();
     }
-  }, [workCanvas, enabled, tool, brush.size, cropActive, cropRect]);
+  }, [
+    workCanvas,
+    originalCanvas,
+    compare,
+    enabled,
+    tool,
+    brush.size,
+    cropActive,
+    cropRect,
+  ]);
 
   useEffect(() => {
     const display = displayRef.current;
@@ -270,12 +287,29 @@ export function EditorCanvas({
       const maxY = workCanvas?.height ?? 0;
       const clampedX = Math.max(0, Math.min(maxX, point.x));
       const clampedY = Math.max(0, Math.min(maxY, point.y));
-      onCropRectChange?.({
-        x: Math.min(start.x, clampedX),
-        y: Math.min(start.y, clampedY),
-        w: Math.abs(clampedX - start.x),
-        h: Math.abs(clampedY - start.y),
-      });
+      const dx = clampedX - start.x;
+      const dy = clampedY - start.y;
+      let x = Math.min(start.x, clampedX);
+      let y = Math.min(start.y, clampedY);
+      let w = Math.abs(dx);
+      let h = Math.abs(dy);
+      if (cropAspect && (w > 0 || h > 0)) {
+        if (w / cropAspect > h) {
+          h = w / cropAspect;
+        } else {
+          w = h * cropAspect;
+        }
+        const signX = dx >= 0 ? 1 : -1;
+        const signY = dy >= 0 ? 1 : -1;
+        const maxW = signX >= 0 ? maxX - start.x : start.x;
+        const maxH = signY >= 0 ? maxY - start.y : start.y;
+        const scale = Math.min(1, maxW / w, maxH / h);
+        w *= scale;
+        h *= scale;
+        x = signX >= 0 ? start.x : start.x - w;
+        y = signY >= 0 ? start.y : start.y - h;
+      }
+      onCropRectChange?.({ x, y, w, h });
       render();
       return;
     }

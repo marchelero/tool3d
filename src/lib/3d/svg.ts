@@ -55,9 +55,9 @@ function cleanRing(ring: Vec2[]): Vec2[] {
   return deduped;
 }
 
-/** Conserva la orientación del SVG: el visor 3D ya lo muestra en el sentido correcto. */
+/** El SVG usa Y hacia abajo; el visor 3D usa Y hacia arriba. */
 function toRing(points: { x: number; y: number }[]): Vec2[] {
-  const ring = cleanRing(points.map((point) => [point.x, point.y] as Vec2));
+  const ring = cleanRing(points.map((point) => [point.x, -point.y] as Vec2));
   return ring.length >= 3 ? ring : [];
 }
 

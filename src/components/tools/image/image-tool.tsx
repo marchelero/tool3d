@@ -8,17 +8,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { defineStepper } from "@stepperize/react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
-  ChevronRight,
+  ArrowLeftRight,
+  ArrowUpRight,
+  Brush,
   Coffee,
+  Copy,
   Crop,
   Download,
   Eraser,
+  Eye,
   FlipHorizontal2,
   FlipVertical2,
+  Image as ImageIcon,
   ImageDown,
   ImagePlus,
   KeyRound,
@@ -28,6 +32,7 @@ import {
   Maximize2,
   Paintbrush,
   Palette,
+  PenTool,
   Redo2,
   RotateCcw,
   RotateCw,
@@ -57,7 +62,6 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import {
   blobToCanvas,
@@ -85,6 +89,7 @@ import {
 } from "@/lib/image/trace";
 import {
   baseName,
+  copyText,
   downloadBlob,
   downloadText,
   downloadZip,
@@ -92,14 +97,25 @@ import {
 
 import { Dropzone } from "./dropzone";
 import { EditorCanvas } from "./editor-canvas";
+import {
+  Field,
+  GroupLabel,
+  Hint,
+  IconAction,
+  PanelSection,
+  PanelTooltips,
+  SegmentedControl,
+  ToggleButton,
+} from "./panel";
 import { SvgPreview } from "./svg-preview";
 import type { BrushSettings, HistoryEntry, Rect } from "./types";
 
 type Status = "empty" | "ready" | "removing";
 type ExportFormat = "png" | "jpeg" | "webp" | "bmp" | "ico";
 type SizeUnit = "px" | "cm" | "mm";
-type EditSection = "size" | "bg" | "export";
-type VectorSection = "style" | "detail" | "export";
+type PanelMode = "image" | "vector";
+type BackgroundSource = "current" | "original";
+type CropAspect = "free" | "1:1" | "4:3" | "16:9";
 
 interface SettingsSnapshot {
   settings: TraceSettings;
@@ -112,12 +128,6 @@ interface SettingsEdit {
 }
 
 const SETTINGS_HISTORY_DELAY = 600;
-
-const { useStepper } = defineStepper([
-  { id: "background", title: "Editar" },
-  { id: "vector", title: "Vector" },
-  { id: "convert", title: "Convertir" },
-] as const);
 
 const TOOL_DESCRIPTION =
   "Carga una imagen, edítala (gira, voltea, recorta, reescala, quítale el fondo y retócala) y después vectorízala a SVG separando sus colores. Todo en tu navegador.";
@@ -141,11 +151,46 @@ interface ResultFile {
 }
 
 const MAX_HISTORY = 30;
+const MAX_SNAPSHOT_PIXELS = 24_000_000;
 const TRACE_DEBOUNCE_MS = 400;
 const MAX_COLORS = 32;
 const DEFAULT_COLORS = 8;
 const INITIAL_COLORS = 4;
 const MAX_LOAD_DIMENSION = 2048;
+const CROP_RATIOS: Record<CropAspect, number | null> = {
+  free: null,
+  "1:1": 1,
+  "4:3": 4 / 3,
+  "16:9": 16 / 9,
+};
+
+interface ImageSnapshot {
+  work: HTMLCanvasElement;
+  original: HTMLCanvasElement;
+}
+
+type ImageHistoryEntry =
+  | ({ kind: "region" } & HistoryEntry)
+  | {
+      kind: "snapshot";
+      label: string;
+      before: ImageSnapshot;
+      after: ImageSnapshot | null;
+      pixels: number;
+    };
+
+function cloneCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
+  const out = createCanvas(source.width, source.height);
+  get2d(out, true).drawImage(source, 0, 0);
+  return out;
+}
+
+function historySnapshotPixels(entries: ImageHistoryEntry[]): number {
+  return entries.reduce(
+    (total, entry) => total + (entry.kind === "snapshot" ? entry.pixels : 0),
+    0
+  );
+}
 
 function initialColorCount(detected: number): number {
   if (detected <= 0) return DEFAULT_COLORS;
@@ -272,10 +317,12 @@ function ColorPalette({
   layers,
   excluded,
   onToggle,
+  onSolo,
 }: {
   layers: ColorLayer[];
   excluded: ReadonlySet<string>;
   onToggle: (hex: string) => void;
+  onSolo: (hex: string) => void;
 }) {
   if (layers.length === 0) return null;
 
@@ -286,37 +333,47 @@ function ColorPalette({
           const hex = rgbToHex(layer.rgb);
           const off = excluded.has(hex);
           return (
-            <button
-              key={hex}
-              type="button"
-              onClick={() => onToggle(hex)}
-              aria-pressed={!off}
-              title={
-                off
-                  ? `${hex} · excluido (clic para incluirlo)`
-                  : `${hex} · ${layer.pathCount} trazo(s)`
-              }
-              className={`relative flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-md border text-[10px] transition hover:border-foreground/40 ${
-                off ? "opacity-40" : ""
-              }`}
-            >
-              <span
-                className="size-6 rounded border"
-                style={{ backgroundColor: hex }}
-                aria-hidden
-              />
-              <span className="truncate px-0.5 text-muted-foreground">
-                {hex}
-              </span>
-              {off ? (
-                <X className="absolute right-0.5 top-0.5 size-3 text-destructive" />
-              ) : null}
-            </button>
+            <div key={hex} className="relative h-14 w-14">
+              <button
+                type="button"
+                onClick={() => onToggle(hex)}
+                aria-pressed={!off}
+                title={
+                  off
+                    ? `${hex} · excluido (clic para incluirlo)`
+                    : `${hex} · ${layer.pathCount} trazo(s)`
+                }
+                className={`flex h-full w-full flex-col items-center justify-center gap-0.5 rounded-md border text-[10px] transition hover:border-foreground/40 ${
+                  off ? "opacity-40" : ""
+                }`}
+              >
+                <span
+                  className="size-6 rounded border"
+                  style={{ backgroundColor: hex }}
+                  aria-hidden
+                />
+                <span className="truncate px-0.5 text-muted-foreground">
+                  {hex}
+                </span>
+                {off ? (
+                  <X className="absolute right-0.5 top-0.5 size-3 text-destructive" />
+                ) : null}
+              </button>
+              <button
+                type="button"
+                onClick={() => onSolo(hex)}
+                aria-label={`Ver solo el color ${hex}`}
+                title={`Ver solo ${hex}`}
+                className="absolute left-0.5 top-0.5 rounded bg-background/90 p-0.5 text-muted-foreground shadow-sm transition hover:text-foreground"
+              >
+                <Eye className="size-3" />
+              </button>
+            </div>
           );
         })}
       </div>
       <p className="text-[11px] text-muted-foreground">
-        Clic en un color para excluirlo o volver a incluirlo en el SVG.
+        Clic para excluir o incluir. El ojo muestra solo ese color.
       </p>
     </div>
   );
@@ -403,9 +460,8 @@ export function ImageTool() {
   const [canRedo, setCanRedo] = useState(false);
   const [traceSettings, setTraceSettingsRaw] =
     useState<TraceSettings>(DEFAULT_TRACE_SETTINGS);
-  const stepper = useStepper();
-  const tab = stepper.id;
-  const vectorMode = tab !== "background";
+  const [mode, setMode] = useState<PanelMode>("image");
+  const vectorMode = mode === "vector";
   const [excludedColors, setExcludedColors] = useState<Set<string>>(new Set());
   const [traceState, setTraceState] = useState<{
     key: string;
@@ -414,6 +470,10 @@ export function ImageTool() {
   const [detectedColors, setDetectedColors] = useState(DEFAULT_COLORS);
   const [cropActive, setCropActive] = useState(false);
   const [cropRect, setCropRect] = useState<Rect | null>(null);
+  const [cropAspect, setCropAspect] = useState<CropAspect>("free");
+  const [compare, setCompare] = useState(false);
+  const [bgSource, setBgSource] = useState<BackgroundSource>("current");
+  const [estimatedSize, setEstimatedSize] = useState<number | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("png");
   const [exportQuality, setExportQuality] = useState(92);
   const [reduction, setReduction] = useState<{
@@ -430,13 +490,12 @@ export function ImageTool() {
   const [resizeLocked, setResizeLocked] = useState(true);
   const [sizeUnit, setSizeUnit] = useState<SizeUnit>("px");
   const [dpi, setDpi] = useState(300);
-  const [editSection, setEditSection] = useState<EditSection>("size");
-  const [vectorSection, setVectorSection] = useState<VectorSection>("style");
   const [widthDraft, setWidthDraft] = useState<string | null>(null);
   const [heightDraft, setHeightDraft] = useState<string | null>(null);
 
-  const historyRef = useRef<HistoryEntry[]>([]);
+  const historyRef = useRef<ImageHistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
+  const bgRunRef = useRef(0);
   const settingsHistoryRef = useRef<SettingsEdit[]>([]);
   const settingsIndexRef = useRef(-1);
   const pendingSettingsRef = useRef<{ before: SettingsSnapshot } | null>(null);
@@ -456,12 +515,83 @@ export function ImageTool() {
     }));
   }, []);
 
+  const refreshDetectedColors = useCallback((canvas: HTMLCanvasElement) => {
+    setDetectedColors(countColors(canvas));
+  }, []);
+
   const resetHistory = useCallback(() => {
     historyRef.current = [];
     historyIndexRef.current = -1;
     setCanUndo(false);
     setCanRedo(false);
   }, []);
+
+  const pushHistoryEntry = useCallback((entry: ImageHistoryEntry) => {
+    let limited = historyRef.current.slice(0, historyIndexRef.current + 1);
+    limited.push(entry);
+    while (limited.length > MAX_HISTORY) limited = limited.slice(1);
+    while (
+      limited.length > 1 &&
+      historySnapshotPixels(limited) > MAX_SNAPSHOT_PIXELS
+    ) {
+      limited = limited.slice(1);
+    }
+    historyRef.current = limited;
+    historyIndexRef.current = limited.length - 1;
+    setCanUndo(limited.length > 0);
+    setCanRedo(false);
+  }, []);
+
+  const captureSnapshot = useCallback((): ImageSnapshot | null => {
+    if (!workCanvas || !originalCanvas) return null;
+    return { work: cloneCanvas(workCanvas), original: originalCanvas };
+  }, [workCanvas, originalCanvas]);
+
+  const restoreSnapshot = useCallback(
+    (snapshot: ImageSnapshot) => {
+      const work = cloneCanvas(snapshot.work);
+      setWorkCanvas(work);
+      setOriginalCanvas(snapshot.original);
+      setTraceState(null);
+      setCropActive(false);
+      setCropRect(null);
+      setCompare(false);
+      setVersion((value) => value + 1);
+      refreshDetectedColors(work);
+    },
+    [refreshDetectedColors]
+  );
+
+  const commitSnapshot = useCallback(
+    (
+      before: ImageSnapshot,
+      nextWork: HTMLCanvasElement,
+      nextOriginal: HTMLCanvasElement,
+      label: string,
+      resyncColors = false
+    ) => {
+      pushHistoryEntry({
+        kind: "snapshot",
+        label,
+        before,
+        after: null,
+        pixels: nextWork.width * nextWork.height,
+      });
+      setWorkCanvas(nextWork);
+      setOriginalCanvas(nextOriginal);
+      setTraceState(null);
+      setCropActive(false);
+      setCropRect(null);
+      setCompare(false);
+      setVersion((value) => value + 1);
+      if (resyncColors) {
+        syncDetectedColors(nextWork);
+      } else {
+        refreshDetectedColors(nextWork);
+      }
+    },
+    [pushHistoryEntry, refreshDetectedColors, syncDetectedColors]
+  );
 
   const traceSettingsRef = useRef(traceSettings);
   const excludedRef = useRef(excludedColors);
@@ -581,14 +711,20 @@ export function ImageTool() {
       setTraceState(null);
       setCropActive(false);
       setCropRect(null);
-      void stepper.goTo("background");
+      setCropAspect("free");
+      setCompare(false);
+      setBgSource("current");
+      setProgress(null);
+      setEstimatedSize(null);
+      bgRunRef.current += 1;
+      setMode("image");
       resetHistory();
       resetSettingsHistory();
       syncDetectedColors(work);
       setStatus("ready");
       setVersion((value) => value + 1);
     },
-    [resetHistory, resetSettingsHistory, stepper, syncDetectedColors]
+    [resetHistory, resetSettingsHistory, syncDetectedColors]
   );
 
   const handleFile = useCallback(
@@ -669,10 +805,12 @@ export function ImageTool() {
 
   const applyResize = useCallback(
     (targetW: number, targetH: number) => {
-      if (!workCanvas || !originalCanvas) return;
+      if (status !== "ready" || !workCanvas || !originalCanvas) return;
       const width = Math.max(1, Math.round(targetW));
       const height = Math.max(1, Math.round(targetH));
       if (width === workCanvas.width && height === workCanvas.height) return;
+      const before = captureSnapshot();
+      if (!before) return;
       const scaleCanvas = (src: HTMLCanvasElement) => {
         const out = createCanvas(width, height);
         const ctx = get2d(out, true);
@@ -681,18 +819,17 @@ export function ImageTool() {
         ctx.drawImage(src, 0, 0, width, height);
         return out;
       };
-      setWorkCanvas(scaleCanvas(workCanvas));
-      setOriginalCanvas(scaleCanvas(originalCanvas));
       setResizeInput(null);
       setWidthDraft(null);
       setHeightDraft(null);
-      setTraceState(null);
-      setCropActive(false);
-      setCropRect(null);
-      resetHistory();
-      setVersion((value) => value + 1);
+      commitSnapshot(
+        before,
+        scaleCanvas(workCanvas),
+        scaleCanvas(originalCanvas),
+        "Redimensionar"
+      );
     },
-    [workCanvas, originalCanvas, resetHistory]
+    [status, workCanvas, originalCanvas, captureSnapshot, commitSnapshot]
   );
 
   const handleWidthInput = useCallback(
@@ -734,54 +871,81 @@ export function ImageTool() {
     applyBase(base);
   }, [applyBase]);
 
+  const restoreOriginalSize = useCallback(() => {
+    const base = pristineRef.current;
+    if (!base) return;
+    applyResize(base.width, base.height);
+  }, [applyResize]);
+
+  const handleCancelRemoveBackground = useCallback(() => {
+    bgRunRef.current += 1;
+    setStatus("ready");
+    setProgress(null);
+    toast.info("Proceso cancelado");
+  }, []);
+
   const handleRemoveBackground = useCallback(async () => {
-    if (!originalCanvas) return;
+    const sourceCanvas =
+      bgSource === "original" ? originalCanvas : workCanvas;
+    if (!sourceCanvas || !originalCanvas || !workCanvas) return;
+    const before = captureSnapshot();
+    if (!before) return;
+    const runId = bgRunRef.current + 1;
+    bgRunRef.current = runId;
     setStatus("removing");
     setProgress({ label: "Preparando modelo", percent: 0 });
     try {
-      const sourceBlob = await canvasToBlob(originalCanvas);
+      const sourceBlob = await canvasToBlob(sourceCanvas);
       const resultBlob = await removeBackgroundClient(sourceBlob, {
         onProgress: (key, current, total) => {
+          if (bgRunRef.current !== runId) return;
           const percent = total > 0 ? Math.round((current / total) * 100) : 0;
           setProgress({ label: describeProgress(key), percent });
         },
       });
+      if (bgRunRef.current !== runId) return;
       const cut = await blobToCanvas(resultBlob);
+      if (bgRunRef.current !== runId) return;
       const work = createCanvas(cut.width, cut.height);
       get2d(work, true).drawImage(cut, 0, 0);
-      setWorkCanvas(work);
       setExcludedColors(new Set());
-      setTraceState(null);
-      resetHistory();
-      syncDetectedColors(work);
-      setVersion((value) => value + 1);
+      commitSnapshot(before, work, originalCanvas, "Quitar fondo", true);
       setStatus("ready");
       toast.success("Fondo eliminado");
     } catch (error) {
+      if (bgRunRef.current !== runId) return;
       console.error(error);
       toast.error("No se pudo quitar el fondo");
       setStatus("ready");
     } finally {
-      setProgress(null);
+      if (bgRunRef.current === runId) setProgress(null);
     }
-  }, [originalCanvas, resetHistory, syncDetectedColors]);
+  }, [
+    bgSource,
+    originalCanvas,
+    workCanvas,
+    captureSnapshot,
+    commitSnapshot,
+  ]);
 
   const applyTransform = useCallback(
     (kind: TransformKind) => {
-      if (!workCanvas || !originalCanvas) return;
-      setWorkCanvas(transformCanvas(workCanvas, kind));
-      setOriginalCanvas(transformCanvas(originalCanvas, kind));
-      setCropActive(false);
-      setCropRect(null);
-      resetHistory();
-      setTraceState(null);
-      setVersion((value) => value + 1);
+      if (status !== "ready" || !workCanvas || !originalCanvas) return;
+      const before = captureSnapshot();
+      if (!before) return;
+      commitSnapshot(
+        before,
+        transformCanvas(workCanvas, kind),
+        transformCanvas(originalCanvas, kind),
+        "Transformar"
+      );
     },
-    [workCanvas, originalCanvas, resetHistory]
+    [status, workCanvas, originalCanvas, captureSnapshot, commitSnapshot]
   );
 
   const applyCrop = useCallback(() => {
-    if (!workCanvas || !originalCanvas || !cropRect) return;
+    if (status !== "ready" || !workCanvas || !originalCanvas || !cropRect)
+      return;
     const x = Math.max(0, Math.round(cropRect.x));
     const y = Math.max(0, Math.round(cropRect.y));
     const w = Math.min(workCanvas.width - x, Math.round(cropRect.w));
@@ -790,34 +954,126 @@ export function ImageTool() {
       toast.error("Selecciona un área válida para recortar");
       return;
     }
+    const before = captureSnapshot();
+    if (!before) return;
     const crop = (src: HTMLCanvasElement) => {
       const out = createCanvas(w, h);
       get2d(out, true).drawImage(src, -x, -y);
       return out;
     };
-    setWorkCanvas(crop(workCanvas));
-    setOriginalCanvas(crop(originalCanvas));
-    setCropActive(false);
-    setCropRect(null);
-    resetHistory();
-    setTraceState(null);
-    setVersion((value) => value + 1);
-  }, [workCanvas, originalCanvas, cropRect, resetHistory]);
+    commitSnapshot(
+      before,
+      crop(workCanvas),
+      crop(originalCanvas),
+      "Recortar"
+    );
+  }, [
+    status,
+    workCanvas,
+    originalCanvas,
+    cropRect,
+    captureSnapshot,
+    commitSnapshot,
+  ]);
 
   const cancelCrop = useCallback(() => {
     setCropActive(false);
     setCropRect(null);
   }, []);
 
-  const handleStroke = useCallback((entry: HistoryEntry) => {
-    const trimmed = historyRef.current.slice(0, historyIndexRef.current + 1);
-    trimmed.push(entry);
-    const limited = trimmed.slice(-MAX_HISTORY);
-    historyRef.current = limited;
-    historyIndexRef.current = limited.length - 1;
-    setCanUndo(limited.length > 0);
-    setCanRedo(false);
-  }, []);
+  const toggleCrop = useCallback(() => {
+    if (status !== "ready") return;
+    setCompare(false);
+    if (cropActive) {
+      setCropActive(false);
+      setCropRect(null);
+      return;
+    }
+    if (workCanvas) {
+      const maxW = workCanvas.width;
+      const maxH = workCanvas.height;
+      const ratio = CROP_RATIOS[cropAspect];
+      let w = maxW;
+      let h = maxH;
+      if (ratio) {
+        if (w / h > ratio) w = h * ratio;
+        else h = w / ratio;
+      }
+      setCropRect({
+        x: Math.round((maxW - w) / 2),
+        y: Math.round((maxH - h) / 2),
+        w: Math.round(w),
+        h: Math.round(h),
+      });
+    }
+    setCropActive(true);
+  }, [cropActive, cropAspect, status, workCanvas]);
+
+  const updateCropAspect = useCallback(
+    (value: CropAspect) => {
+      setCropAspect(value);
+      const ratio = CROP_RATIOS[value];
+      if (!ratio || !workCanvas) return;
+      setCropRect((current) => {
+        if (!current || current.w <= 0) return current;
+        let w = current.w;
+        let h = w / ratio;
+        if (current.y + h > workCanvas.height) {
+          h = workCanvas.height - current.y;
+          w = h * ratio;
+        }
+        if (current.x + w > workCanvas.width) {
+          w = workCanvas.width - current.x;
+          h = w / ratio;
+        }
+        return { ...current, w, h };
+      });
+    },
+    [workCanvas]
+  );
+
+  const updateCropField = useCallback(
+    (field: "x" | "y" | "w" | "h", raw: string) => {
+      if (!workCanvas) return;
+      const value = Number(raw);
+      if (raw.trim() === "" || !Number.isFinite(value)) return;
+      const ratio = CROP_RATIOS[cropAspect];
+      const maxW = workCanvas.width;
+      const maxH = workCanvas.height;
+      setCropRect((current) => {
+        const base = current ?? { x: 0, y: 0, w: maxW, h: maxH };
+        let { x, y, w, h } = base;
+        if (field === "x") {
+          x = Math.max(0, Math.min(maxW - 1, Math.round(value)));
+          w = Math.min(w, maxW - x);
+        } else if (field === "y") {
+          y = Math.max(0, Math.min(maxH - 1, Math.round(value)));
+          h = Math.min(h, maxH - y);
+        } else if (field === "w") {
+          w = Math.max(1, Math.min(maxW - x, Math.round(value)));
+          if (ratio) {
+            h = Math.min(maxH - y, w / ratio);
+            w = h * ratio;
+          }
+        } else {
+          h = Math.max(1, Math.min(maxH - y, Math.round(value)));
+          if (ratio) {
+            w = Math.min(maxW - x, h * ratio);
+            h = w / ratio;
+          }
+        }
+        return { x, y, w, h };
+      });
+    },
+    [workCanvas, cropAspect]
+  );
+
+  const handleStroke = useCallback(
+    (entry: HistoryEntry) => {
+      pushHistoryEntry({ kind: "region", ...entry });
+    },
+    [pushHistoryEntry]
+  );
 
   const applyRegion = useCallback(
     (entry: HistoryEntry, data: ImageData) => {
@@ -830,24 +1086,122 @@ export function ImageTool() {
   );
 
   const handleUndo = useCallback(() => {
-    if (historyIndexRef.current < 0) return;
-    const entry = historyRef.current[historyIndexRef.current];
-    applyRegion(entry, entry.before);
-    historyIndexRef.current -= 1;
-    setCanUndo(historyIndexRef.current >= 0);
+    if (status !== "ready") return;
+    const index = historyIndexRef.current;
+    if (index < 0) return;
+    const entry = historyRef.current[index];
+    if (entry.kind === "region") {
+      applyRegion(entry, entry.before);
+      setVersion((value) => value + 1);
+    } else {
+      if (!entry.after) {
+        entry.after = captureSnapshot();
+      }
+      restoreSnapshot(entry.before);
+    }
+    historyIndexRef.current = index - 1;
+    setCanUndo(index - 1 >= 0);
     setCanRedo(true);
-    setVersion((value) => value + 1);
-  }, [applyRegion]);
+  }, [applyRegion, captureSnapshot, restoreSnapshot, status]);
 
   const handleRedo = useCallback(() => {
-    if (historyIndexRef.current + 1 >= historyRef.current.length) return;
-    const entry = historyRef.current[historyIndexRef.current + 1];
-    applyRegion(entry, entry.after);
-    historyIndexRef.current += 1;
+    if (status !== "ready") return;
+    const next = historyIndexRef.current + 1;
+    if (next >= historyRef.current.length) return;
+    const entry = historyRef.current[next];
+    if (entry.kind === "region") {
+      applyRegion(entry, entry.after);
+      setVersion((value) => value + 1);
+    } else {
+      if (!entry.after) return;
+      restoreSnapshot(entry.after);
+    }
+    historyIndexRef.current = next;
     setCanUndo(true);
-    setCanRedo(historyIndexRef.current + 1 < historyRef.current.length);
-    setVersion((value) => value + 1);
-  }, [applyRegion]);
+    setCanRedo(next + 1 < historyRef.current.length);
+  }, [applyRegion, restoreSnapshot, status]);
+
+  useEffect(() => {
+    const isEditable = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null;
+      if (!element) return false;
+      return (
+        element.tagName === "INPUT" ||
+        element.tagName === "TEXTAREA" ||
+        element.tagName === "SELECT" ||
+        element.isContentEditable
+      );
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditable(event.target)) return;
+      const mod = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
+      if (mod && !event.altKey) {
+        if (key === "z") {
+          event.preventDefault();
+          if (vectorMode) {
+            if (event.shiftKey) handleRedoSettings();
+            else handleUndoSettings();
+          } else if (event.shiftKey) {
+            handleRedo();
+          } else {
+            handleUndo();
+          }
+          return;
+        }
+        if (key === "y") {
+          event.preventDefault();
+          if (vectorMode) handleRedoSettings();
+          else handleRedo();
+          return;
+        }
+      }
+      if (mod || event.altKey || status !== "ready" || vectorMode) {
+        return;
+      }
+      switch (key) {
+        case "b":
+          setTool("brush");
+          break;
+        case "w":
+          setTool("wand");
+          break;
+        case "e":
+          setBrush((value) => ({ ...value, mode: "erase" }));
+          break;
+        case "r":
+          setBrush((value) => ({ ...value, mode: "restore" }));
+          break;
+        case "c":
+          toggleCrop();
+          break;
+        case "[":
+          setBrush((value) => ({
+            ...value,
+            size: Math.max(8, value.size - 4),
+          }));
+          break;
+        case "]":
+          setBrush((value) => ({
+            ...value,
+            size: Math.min(200, value.size + 4),
+          }));
+          break;
+        default:
+          return;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    handleRedo,
+    handleRedoSettings,
+    handleUndo,
+    handleUndoSettings,
+    status,
+    toggleCrop,
+    vectorMode,
+  ]);
 
   const handleExportPng = useCallback(async () => {
     if (!workCanvas) return;
@@ -860,61 +1214,88 @@ export function ImageTool() {
     }
   }, [workCanvas, fileName]);
 
+  const buildExportBlob = useCallback(async (): Promise<{
+    blob: Blob;
+    ext: string;
+  }> => {
+    if (!workCanvas) throw new Error("No hay imagen");
+    if (exportFormat === "bmp") {
+      return { blob: canvasToBmp(workCanvas), ext: "bmp" };
+    }
+    if (exportFormat === "ico") {
+      return { blob: await canvasToIco(workCanvas), ext: "ico" };
+    }
+    let source = workCanvas;
+    if (exportFormat === "jpeg") {
+      const flat = createCanvas(workCanvas.width, workCanvas.height);
+      const ctx = get2d(flat, true);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, flat.width, flat.height);
+      ctx.drawImage(workCanvas, 0, 0);
+      source = flat;
+    }
+    const type =
+      exportFormat === "png"
+        ? "image/png"
+        : exportFormat === "jpeg"
+          ? "image/jpeg"
+          : "image/webp";
+    const quality = exportFormat === "png" ? undefined : exportQuality / 100;
+    return {
+      blob: await canvasToBlob(source, type, quality),
+      ext: exportFormat === "jpeg" ? "jpg" : exportFormat,
+    };
+  }, [workCanvas, exportFormat, exportQuality]);
+
   const handleExportImage = useCallback(async () => {
-    if (!workCanvas) return;
     try {
-      let blob: Blob;
-      let ext: string;
-      if (exportFormat === "bmp") {
-        blob = canvasToBmp(workCanvas);
-        ext = "bmp";
-      } else if (exportFormat === "ico") {
-        blob = await canvasToIco(workCanvas);
-        ext = "ico";
-      } else {
-        let source = workCanvas;
-        if (exportFormat === "jpeg") {
-          const flat = createCanvas(workCanvas.width, workCanvas.height);
-          const ctx = get2d(flat, true);
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, flat.width, flat.height);
-          ctx.drawImage(workCanvas, 0, 0);
-          source = flat;
-        }
-        const type =
-          exportFormat === "png"
-            ? "image/png"
-            : exportFormat === "jpeg"
-              ? "image/jpeg"
-              : "image/webp";
-        const quality = exportFormat === "png" ? undefined : exportQuality / 100;
-        blob = await canvasToBlob(source, type, quality);
-        ext = exportFormat === "jpeg" ? "jpg" : exportFormat;
-      }
+      const { blob, ext } = await buildExportBlob();
       downloadBlob(blob, `${baseName(fileName)}.${ext}`);
       toast.success(`Imagen descargada (${ext.toUpperCase()})`);
     } catch {
       toast.error("No se pudo exportar la imagen");
     }
-  }, [workCanvas, exportFormat, exportQuality, fileName]);
+  }, [buildExportBlob, fileName]);
+
+  useEffect(() => {
+    if (!workCanvas) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const { blob } = await buildExportBlob();
+        if (!cancelled) setEstimatedSize(blob.size);
+      } catch {
+        if (!cancelled) setEstimatedSize(null);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [buildExportBlob, workCanvas, version]);
 
   const handleNewImage = useCallback(() => {
     setOriginalCanvas(null);
     setWorkCanvas(null);
     setFileName("");
     setStatus("empty");
-    void stepper.goTo("background");
+    setMode("image");
     setExcludedColors(new Set());
     setTraceState(null);
     setDetectedColors(DEFAULT_COLORS);
     setCropActive(false);
     setCropRect(null);
+    setCropAspect("free");
+    setCompare(false);
+    setBgSource("current");
+    setEstimatedSize(null);
+    bgRunRef.current += 1;
     pristineRef.current = null;
     fullResRef.current = null;
     setReduction(null);
     setProgress(null);
     resetHistory();
-  }, [resetHistory, stepper]);
+  }, [resetHistory]);
 
   const traceKey = useMemo(
     () => JSON.stringify([version, traceSettings]),
@@ -922,7 +1303,7 @@ export function ImageTool() {
   );
 
   useEffect(() => {
-    if (tab === "background" || !workCanvas) return;
+    if (mode !== "vector" || !workCanvas) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (cancelled) return;
@@ -939,11 +1320,11 @@ export function ImageTool() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [tab, workCanvas, traceKey, traceSettings]);
+  }, [mode, workCanvas, traceKey, traceSettings]);
 
   const traceResult = traceState ? traceState.result : null;
   const tracing =
-    tab !== "background" &&
+    mode === "vector" &&
     workCanvas !== null &&
     (!traceState || traceState.key !== traceKey);
 
@@ -999,6 +1380,42 @@ export function ImageTool() {
     queueSettingsHistory();
     setExcludedColors(new Set());
   }, [queueSettingsHistory]);
+
+  const soloColor = useCallback(
+    (hex: string) => {
+      queueSettingsHistory();
+      setExcludedColors(
+        new Set(
+          allLayers
+            .map((layer) => rgbToHex(layer.rgb))
+            .filter((color) => color !== hex)
+        )
+      );
+    },
+    [allLayers, queueSettingsHistory]
+  );
+
+  const invertColors = useCallback(() => {
+    queueSettingsHistory();
+    setExcludedColors((prev) => {
+      const next = new Set<string>();
+      for (const layer of allLayers) {
+        const hex = rgbToHex(layer.rgb);
+        if (!prev.has(hex)) next.add(hex);
+      }
+      return next;
+    });
+  }, [allLayers, queueSettingsHistory]);
+
+  const handleCopySvg = useCallback(async () => {
+    if (!visibleSvg) return;
+    try {
+      await copyText(visibleSvg);
+      toast.success("SVG copiado al portapapeles");
+    } catch {
+      toast.error("No se pudo copiar el SVG");
+    }
+  }, [visibleSvg]);
 
   const resetTraceSettings = useCallback(() => {
     updateTraceSettings((settings) => ({
@@ -1163,8 +1580,10 @@ export function ImageTool() {
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
             <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
-              {tab !== "background" ? (
+              {vectorMode ? (
                 <Scissors className="size-4" />
+              ) : compare ? (
+                <Eye className="size-4" />
               ) : cropActive ? (
                 <Crop className="size-4" />
               ) : tool === "wand" ? (
@@ -1173,21 +1592,23 @@ export function ImageTool() {
                 <Paintbrush className="size-4" />
               )}
               <span className="font-medium text-foreground">
-                {tab !== "background"
+                {vectorMode
                   ? "Vista vectorial"
-                  : cropActive
-                    ? "Recorte"
-                    : tool === "wand"
-                      ? "Varita mágica"
-                      : "Pincel"}
+                  : compare
+                    ? "Original (antes)"
+                    : cropActive
+                      ? "Recorte"
+                      : tool === "wand"
+                        ? "Varita mágica"
+                        : "Pincel"}
               </span>
-              {tab === "background" && !cropActive ? (
+              {!vectorMode && !cropActive && !compare ? (
                 <span>· {brush.mode === "erase" ? "Quitar" : "Mantener"}</span>
               ) : null}
             </div>
 
             <div className="ml-auto flex items-center gap-1">
-              {tab !== "background" ? (
+              {vectorMode ? (
                 <span className="px-2 text-xs tabular-nums text-muted-foreground">
                   {tracing
                     ? "Vectorizando…"
@@ -1195,7 +1616,23 @@ export function ImageTool() {
                       ? `${visibleLayers.length}/${allLayers.length} colores`
                       : "Sin formas"}
                 </span>
-              ) : null}
+              ) : (
+                <Button
+                  size="icon-sm"
+                  variant={compare ? "secondary" : "ghost"}
+                  onClick={() => {
+                    setCropActive(false);
+                    setCropRect(null);
+                    setCompare((value) => !value);
+                  }}
+                  disabled={status !== "ready"}
+                  aria-label="Comparar con el original"
+                  aria-pressed={compare}
+                  title="Comparar con el original"
+                >
+                  <Eye className="size-4" />
+                </Button>
+              )}
               <Button
                 size="icon-sm"
                 variant="ghost"
@@ -1224,17 +1661,19 @@ export function ImageTool() {
           </div>
 
           <div className="relative">
-            {tab === "background" ? (
+            {!vectorMode ? (
               <EditorCanvas
                 workCanvas={workCanvas}
                 originalCanvas={originalCanvas}
                 tool={tool}
                 brush={brush}
                 tolerance={tolerance}
-                enabled={status === "ready"}
+                enabled={status === "ready" && !compare}
                 version={version}
+                compare={compare}
                 cropActive={cropActive}
                 cropRect={cropRect}
+                cropAspect={CROP_RATIOS[cropAspect]}
                 onCropRectChange={setCropRect}
                 onStroke={handleStroke}
               />
@@ -1261,6 +1700,12 @@ export function ImageTool() {
               </div>
             ) : null}
 
+            {compare && !vectorMode ? (
+              <div className="absolute left-3 top-3 z-10 rounded-md border bg-background/90 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur">
+                Original (antes de los retoques)
+              </div>
+            ) : null}
+
             {status === "removing" ? (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/70 backdrop-blur-sm">
                 <Loader2 className="size-8 animate-spin text-primary" />
@@ -1270,152 +1715,138 @@ export function ImageTool() {
                 <p className="text-xs text-muted-foreground">
                   Todo se procesa en tu navegador
                 </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleCancelRemoveBackground}
+                >
+                  Cancelar
+                </Button>
+                {progress ? (
+                  <p className="text-xs tabular-nums text-muted-foreground">
+                    {progress.label} · {progress.percent}%
+                  </p>
+                ) : null}
               </div>
             ) : null}
           </div>
         </div>
 
-        <div>
-          <ol
-            aria-label="Pasos"
-            className="flex w-full items-start justify-center gap-1"
-          >
-            {stepper.steps.map((step, index) => {
-              const status = stepper.status(step.id);
-              const active = status === "active";
-              const visited = status === "previous";
-              return (
-                <li key={step.id} className="flex items-start">
-                  {index > 0 ? (
-                    <ChevronRight
-                      aria-hidden="true"
-                      className={`mt-2.5 size-4 shrink-0 ${
-                        active || visited
-                          ? "text-primary"
-                          : "text-muted-foreground/50"
-                      }`}
+        <aside
+          aria-label="Controles de imagen"
+          className="space-y-3 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:self-start lg:overflow-y-auto lg:pr-1"
+        >
+          <PanelTooltips>
+            <div className="rounded-xl border bg-card p-1.5">
+              <SegmentedControl
+                label="Vista de trabajo"
+                value={mode}
+                onValueChange={setMode}
+                options={[
+                  { value: "image", label: "Imagen", icon: ImageIcon },
+                  { value: "vector", label: "Vector", icon: PenTool },
+                ]}
+              />
+            </div>
+
+            {mode === "image" ? (
+              <>
+                <PanelSection
+                  icon={RotateCw}
+                  title="Transformar"
+                  summary="Girar · recortar"
+                >
+                  <div className="grid grid-cols-4 gap-1.5">
+                    <IconAction
+                      label="Girar a la izquierda"
+                      icon={RotateCcw}
+                      onClick={() => applyTransform("rotL")}
                     />
-                  ) : null}
-                  <button
-                    type="button"
-                    id={`step-tab-${step.id}`}
-                    aria-current={active ? "step" : undefined}
-                    aria-controls={`step-panel-${step.id}`}
-                    onClick={() => void stepper.goTo(step.id)}
-                    className="group flex flex-col items-center gap-1.5 rounded-lg px-4 py-1 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <span
-                      className={`flex size-9 shrink-0 items-center justify-center rounded-full border text-sm font-semibold tabular-nums transition-colors ${
-                        active
-                          ? "border-primary bg-primary text-primary-foreground shadow-sm"
-                          : visited
-                            ? "border-primary bg-primary/10 text-primary"
-                            : "border-border bg-muted/60 text-muted-foreground group-hover:border-primary/40"
-                      }`}
-                    >
-                      {index + 1}
-                    </span>
-                    <span
-                      className={`text-xs font-medium transition-colors ${
-                        active
-                          ? "text-foreground"
-                          : visited
-                            ? "text-primary"
-                            : "text-muted-foreground group-hover:text-foreground"
-                      }`}
-                    >
-                      {step.title}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-
-          {tab === "background" ? (
-            <div
-              id="step-panel-background"
-              role="region"
-              aria-labelledby="step-tab-background"
-              className="mt-4"
-            >
-              <Tabs
-                value={editSection}
-                onValueChange={(value: string) =>
-                  setEditSection(value as EditSection)
-                }
-                className="gap-4"
-              >
-                <TabsList className="grid w-full grid-cols-3">
-                  <TabsTrigger value="size">Tamaño</TabsTrigger>
-                  <TabsTrigger value="bg">Fondo</TabsTrigger>
-                  <TabsTrigger value="export">Exportar</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="size" className="space-y-3">
-                  <div className="space-y-1.5">
-                    <Label>Transformar</Label>
-                    <div className="grid grid-cols-5 gap-1.5">
-                      <Button
-                        size="icon-sm"
-                        variant="outline"
-                        onClick={() => applyTransform("rotL")}
-                        aria-label="Girar a la izquierda"
-                        title="Girar a la izquierda"
-                      >
-                        <RotateCcw className="size-4" />
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        variant="outline"
-                        onClick={() => applyTransform("rotR")}
-                        aria-label="Girar a la derecha"
-                        title="Girar a la derecha"
-                      >
-                        <RotateCw className="size-4" />
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        variant="outline"
-                        onClick={() => applyTransform("flipH")}
-                        aria-label="Voltear horizontal"
-                        title="Voltear horizontal"
-                      >
-                        <FlipHorizontal2 className="size-4" />
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        variant="outline"
-                        onClick={() => applyTransform("flipV")}
-                        aria-label="Voltear vertical"
-                        title="Voltear vertical"
-                      >
-                        <FlipVertical2 className="size-4" />
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        variant={cropActive ? "default" : "outline"}
-                        aria-pressed={cropActive}
-                        onClick={() => {
-                          setCropActive((value) => !value);
-                          setCropRect(null);
-                        }}
-                        aria-label="Recortar"
-                        title="Recortar"
-                      >
-                        <Crop className="size-4" />
-                      </Button>
-                    </div>
+                    <IconAction
+                      label="Girar a la derecha"
+                      icon={RotateCw}
+                      onClick={() => applyTransform("rotR")}
+                    />
+                    <IconAction
+                      label="Voltear horizontal"
+                      icon={FlipHorizontal2}
+                      onClick={() => applyTransform("flipH")}
+                    />
+                    <IconAction
+                      label="Voltear vertical"
+                      icon={FlipVertical2}
+                      onClick={() => applyTransform("flipV")}
+                    />
                   </div>
 
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={cropActive ? "default" : "outline"}
+                    aria-pressed={cropActive}
+                    onClick={toggleCrop}
+                    className="w-full"
+                  >
+                    <Crop className="size-4" />
+                    {cropActive ? "Cancelar recorte" : "Recortar"}
+                  </Button>
+
                   {cropActive ? (
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground">
-                        Arrastra sobre la imagen para elegir el área a recortar.
-                      </p>
+                    <div className="space-y-2 rounded-lg bg-muted/50 p-2">
+                      <Hint>
+                        Arrastra sobre la imagen o ajusta los valores.
+                      </Hint>
+                      <div className="space-y-1.5">
+                        <GroupLabel>Proporción</GroupLabel>
+                        <SegmentedControl
+                          label="Proporción de recorte"
+                          value={cropAspect}
+                          onValueChange={updateCropAspect}
+                          columns={4}
+                          options={[
+                            { value: "free", label: "Libre" },
+                            { value: "1:1", label: "1:1" },
+                            { value: "4:3", label: "4:3" },
+                            { value: "16:9", label: "16:9" },
+                          ]}
+                        />
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {(
+                          [
+                            ["x", "X"],
+                            ["y", "Y"],
+                            ["w", "Ancho"],
+                            ["h", "Alto"],
+                          ] as const
+                        ).map(([field, label]) => (
+                          <div key={field} className="space-y-1">
+                            <Label
+                              htmlFor={`crop-${field}`}
+                              className="text-[10px] text-muted-foreground"
+                            >
+                              {label}
+                            </Label>
+                            <Input
+                              id={`crop-${field}`}
+                              type="number"
+                              inputMode="numeric"
+                              className="h-7 px-1.5 text-xs tabular-nums"
+                              value={Math.round(cropRect?.[field] ?? 0)}
+                              onChange={(event) =>
+                                updateCropField(field, event.target.value)
+                              }
+                            />
+                          </div>
+                        ))}
+                      </div>
                       <div className="grid grid-cols-2 gap-2">
-                        <Button size="sm" onClick={applyCrop}>
-                          Aplicar recorte
+                        <Button
+                          size="sm"
+                          onClick={applyCrop}
+                          disabled={!cropRect}
+                        >
+                          Aplicar
                         </Button>
                         <Button
                           size="sm"
@@ -1428,15 +1859,20 @@ export function ImageTool() {
                     </div>
                   ) : null}
 
-                  <Separator />
+                  <Hint>
+                    Atajos: C recorte · Ctrl+Z deshacer · Ctrl+Y rehacer.
+                  </Hint>
+                </PanelSection>
 
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <Label className="flex items-center gap-1.5">
-                        <Scaling className="size-3.5" />
-                        Tamaño
-                      </Label>
-                      <span className="text-xs tabular-nums text-muted-foreground">
+                <PanelSection
+                  icon={Scaling}
+                  title="Tamaño"
+                  summary={`${resizeW}×${resizeH} px`}
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label>Medidas</Label>
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
                         {sizeUnit === "px"
                           ? `≈ ${formatPhysical(resizeW, dpi, "cm")} × ${formatPhysical(resizeH, dpi, "cm")}`
                           : `≈ ${Math.round(resizeW)} × ${Math.round(resizeH)} px`}
@@ -1444,8 +1880,13 @@ export function ImageTool() {
                     </div>
 
                     <div className="flex items-end gap-2">
-                      <div className="flex-1 space-y-1.5">
-                        <Label htmlFor="resize-width">Ancho</Label>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <Label
+                          htmlFor="resize-width"
+                          className="text-[11px] text-muted-foreground"
+                        >
+                          Ancho
+                        </Label>
                         <Input
                           id="resize-width"
                           type="text"
@@ -1460,29 +1901,23 @@ export function ImageTool() {
                           onBlur={() => setWidthDraft(null)}
                         />
                       </div>
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        onClick={() => setResizeLocked((value) => !value)}
-                        aria-label={
+                      <IconAction
+                        label={
                           resizeLocked
                             ? "Desbloquear proporción"
                             : "Bloquear proporción"
                         }
-                        title={
-                          resizeLocked
-                            ? "Proporción bloqueada"
-                            : "Proporción libre"
-                        }
-                      >
-                        {resizeLocked ? (
-                          <Lock className="size-4" />
-                        ) : (
-                          <Unlock className="size-4" />
-                        )}
-                      </Button>
-                      <div className="flex-1 space-y-1.5">
-                        <Label htmlFor="resize-height">Alto</Label>
+                        icon={resizeLocked ? Lock : Unlock}
+                        active={resizeLocked}
+                        onClick={() => setResizeLocked((value) => !value)}
+                      />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <Label
+                          htmlFor="resize-height"
+                          className="text-[11px] text-muted-foreground"
+                        >
+                          Alto
+                        </Label>
                         <Input
                           id="resize-height"
                           type="text"
@@ -1497,193 +1932,201 @@ export function ImageTool() {
                           onBlur={() => setHeightDraft(null)}
                         />
                       </div>
-                      <Button
-                        size="icon-sm"
-                        onClick={() => applyResize(resizeW, resizeH)}
-                        disabled={
-                          !workCanvas ||
-                          (resizeW === workCanvas.width &&
-                            resizeH === workCanvas.height)
-                        }
-                        aria-label="Aplicar tamaño"
-                        title="Aplicar tamaño"
-                      >
-                        <Save className="size-4" />
-                      </Button>
                     </div>
 
-                    <div className="flex items-end gap-2">
-                      <div className="flex-1 space-y-1.5">
-                        <Label htmlFor="size-unit">Unidad</Label>
-                        <Select
-                          value={sizeUnit}
-                          onValueChange={(value: string) => {
-                            setSizeUnit(value as SizeUnit);
-                            setWidthDraft(null);
-                            setHeightDraft(null);
-                          }}
-                        >
-                          <SelectTrigger id="size-unit" className="w-full">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="px">Píxeles (px)</SelectItem>
-                            <SelectItem value="cm">Centímetros (cm)</SelectItem>
-                            <SelectItem value="mm">Milímetros (mm)</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      {sizeUnit !== "px" ? (
-                        <div className="w-24 space-y-1.5">
-                          <Label htmlFor="size-dpi">DPI</Label>
-                          <Input
-                            id="size-dpi"
-                            type="number"
-                            min={1}
-                            value={dpi}
-                            onChange={(event) => {
-                              const value = Number(event.target.value);
-                              if (Number.isFinite(value) && value > 0) {
-                                setDpi(Math.round(value));
-                                setWidthDraft(null);
-                                setHeightDraft(null);
-                              }
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      {[512, 1024, 2048].map((px) => (
-                        <Button
-                          key={px}
-                          size="sm"
-                          variant="outline"
-                          onClick={() => applyLongestSide(px)}
-                        >
-                          {px}px
-                        </Button>
-                      ))}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={applyPristineSize}
-                      >
-                        Original
-                      </Button>
-                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => applyResize(resizeW, resizeH)}
+                      disabled={
+                        !workCanvas ||
+                        (resizeW === workCanvas.width &&
+                          resizeH === workCanvas.height)
+                      }
+                    >
+                      <Save className="size-4" />
+                      Aplicar tamaño
+                    </Button>
                   </div>
 
-                </TabsContent>
+                  <div className="flex items-end gap-2">
+                    <div className="flex-1 space-y-1.5">
+                      <Label htmlFor="size-unit">Unidad</Label>
+                      <Select
+                        value={sizeUnit}
+                        onValueChange={(value: string) => {
+                          setSizeUnit(value as SizeUnit);
+                          setWidthDraft(null);
+                          setHeightDraft(null);
+                        }}
+                      >
+                        <SelectTrigger id="size-unit" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="px">Píxeles (px)</SelectItem>
+                          <SelectItem value="cm">Centímetros (cm)</SelectItem>
+                          <SelectItem value="mm">Milímetros (mm)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {sizeUnit !== "px" ? (
+                      <div className="w-24 space-y-1.5">
+                        <Label htmlFor="size-dpi">DPI</Label>
+                        <Input
+                          id="size-dpi"
+                          type="number"
+                          min={1}
+                          value={dpi}
+                          onChange={(event) => {
+                            const value = Number(event.target.value);
+                            if (Number.isFinite(value) && value > 0) {
+                              setDpi(Math.round(value));
+                              setWidthDraft(null);
+                              setHeightDraft(null);
+                            }
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
 
-                <TabsContent value="bg" className="space-y-4">
-                  <div className="space-y-2">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Sparkles className="size-3.5" />
-                      Paso 1 · Quitar fondo
-                    </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[512, 1024, 2048].map((px) => (
+                      <Button
+                        key={px}
+                        size="sm"
+                        variant="outline"
+                        onClick={() => applyLongestSide(px)}
+                      >
+                        {px}px
+                      </Button>
+                    ))}
                     <Button
-                      className="w-full"
-                      onClick={handleRemoveBackground}
-                      disabled={status === "removing"}
+                      size="sm"
+                      variant="outline"
+                      onClick={restoreOriginalSize}
+                      title="Escalar al tamaño de la imagen cargada"
                     >
-                      {status === "removing" ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Sparkles className="size-4" />
-                      )}
-                      Quitar fondo (IA)
+                      Tamaño original
                     </Button>
-                    <p className="text-[11px] text-muted-foreground">
-                      IA local: tu imagen no se sube a ningún servidor. La
-                      primera vez descarga el modelo (necesita internet) y
-                      luego queda guardado para usarlo sin conexión.
-                    </p>
+                  </div>
+
+                  <Separator />
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full justify-start text-muted-foreground"
+                    onClick={applyPristineSize}
+                    title="Descartar todos los cambios y volver a la imagen cargada"
+                  >
+                    <RotateCcw className="size-4" />
+                    Restablecer todo
+                  </Button>
+                </PanelSection>
+
+                <PanelSection
+                  icon={Eraser}
+                  title="Fondo"
+                  summary={
+                    status === "removing" ? "Procesando…" : "IA + retoque"
+                  }
+                >
+                  <div className="space-y-2">
+                    <GroupLabel icon={Sparkles}>Automático</GroupLabel>
+                    <div className="space-y-1.5">
+                      <Label>Aplicar sobre</Label>
+                      <SegmentedControl
+                        label="Origen para quitar el fondo"
+                        value={bgSource}
+                        onValueChange={setBgSource}
+                        options={[
+                          { value: "current", label: "Resultado" },
+                          { value: "original", label: "Original" },
+                        ]}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        onClick={handleRemoveBackground}
+                        disabled={status === "removing"}
+                      >
+                        {status === "removing" ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Sparkles className="size-4" />
+                        )}
+                        Quitar fondo
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleCancelRemoveBackground}
+                        disabled={status !== "removing"}
+                      >
+                        <X className="size-4" />
+                        Cancelar
+                      </Button>
+                    </div>
+                    <Hint>
+                      “Resultado” conserva tus retoques; “Original” parte de la
+                      imagen sin retoques. IA local: la imagen no se sube a
+                      ningún servidor.
+                    </Hint>
                     {progress ? (
                       <div className="space-y-1">
                         <Progress value={progress.percent} />
-                        <p className="text-xs text-muted-foreground">
+                        <Hint>
                           {progress.label} · {progress.percent}%
-                        </p>
+                        </Hint>
                       </div>
                     ) : null}
                   </div>
 
                   <Separator />
 
-                  <div className="space-y-4">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Wand2 className="size-3.5" />
-                      Paso 2 · Retoque manual
-                    </p>
+                  <div className="space-y-3">
+                    <GroupLabel icon={Wand2}>Retoque manual</GroupLabel>
+
                     <div className="space-y-1.5">
                       <Label>Herramienta</Label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <Button
-                          size="sm"
-                          variant={tool === "brush" ? "default" : "outline"}
-                          aria-pressed={tool === "brush"}
-                          onClick={() => setTool("brush")}
-                        >
-                          <Paintbrush className="size-3.5" />
-                          Pincel
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={tool === "wand" ? "default" : "outline"}
-                          aria-pressed={tool === "wand"}
-                          onClick={() => setTool("wand")}
-                        >
-                          <Wand2 className="size-3.5" />
-                          Varita
-                        </Button>
-                      </div>
+                      <SegmentedControl
+                        label="Herramienta de retoque"
+                        value={tool}
+                        onValueChange={setTool}
+                        options={[
+                          {
+                            value: "brush",
+                            label: "Pincel",
+                            icon: Paintbrush,
+                          },
+                          { value: "wand", label: "Varita", icon: Wand2 },
+                        ]}
+                      />
                     </div>
 
                     <div className="space-y-1.5">
                       <Label>Acción</Label>
-                      <div className="grid grid-cols-2 gap-2">
-                        <Button
-                          size="sm"
-                          variant={
-                            brush.mode === "erase" ? "default" : "outline"
-                          }
-                          aria-pressed={brush.mode === "erase"}
-                          onClick={() =>
-                            setBrush((value) => ({ ...value, mode: "erase" }))
-                          }
-                        >
-                          <Eraser className="size-3.5" />
-                          Quitar
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant={
-                            brush.mode === "restore" ? "default" : "outline"
-                          }
-                          aria-pressed={brush.mode === "restore"}
-                          onClick={() =>
-                            setBrush((value) => ({
-                              ...value,
-                              mode: "restore",
-                            }))
-                          }
-                        >
-                          <Paintbrush className="size-3.5" />
-                          Mantener
-                        </Button>
-                      </div>
+                      <SegmentedControl
+                        label="Acción de retoque"
+                        value={brush.mode}
+                        onValueChange={(nextMode) =>
+                          setBrush((value) => ({ ...value, mode: nextMode }))
+                        }
+                        options={[
+                          { value: "erase", label: "Quitar", icon: Eraser },
+                          { value: "restore", label: "Mantener", icon: Brush },
+                        ]}
+                      />
                     </div>
 
                     {tool === "brush" ? (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label htmlFor="brush-size">Tamaño del pincel</Label>
-                          <span className="text-xs tabular-nums text-muted-foreground">
-                            {brush.size}px
-                          </span>
-                        </div>
+                      <Field
+                        label="Tamaño del pincel"
+                        htmlFor="brush-size"
+                        value={`${brush.size}px`}
+                      >
                         <Slider
                           id="brush-size"
                           min={8}
@@ -1697,15 +2140,13 @@ export function ImageTool() {
                             }))
                           }
                         />
-                      </div>
+                      </Field>
                     ) : (
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label htmlFor="wand-tolerance">Tolerancia</Label>
-                          <span className="text-xs tabular-nums text-muted-foreground">
-                            {tolerance}%
-                          </span>
-                        </div>
+                      <Field
+                        label="Tolerancia"
+                        htmlFor="wand-tolerance"
+                        value={`${tolerance}%`}
+                      >
                         <Slider
                           id="wand-tolerance"
                           min={0}
@@ -1716,38 +2157,35 @@ export function ImageTool() {
                             setTolerance(values[0])
                           }
                         />
-                      </div>
+                      </Field>
                     )}
 
-                    <p className="text-xs text-muted-foreground">
+                    <Hint>
                       {tool === "wand"
                         ? "Toca una zona de la imagen para seleccionar y quitar (o mantener) regiones de color similar. Aumenta la tolerancia para abarcar más tonos."
                         : "Pinta sobre la imagen para quitar o mantener partes."}
-                    </p>
-
-                    <Separator />
-
-                    <Button
-                      variant="secondary"
-                      className="w-full"
-                      onClick={applyPristineSize}
-                    >
-                      <RotateCcw className="size-4" />
-                      Volver a la original
-                    </Button>
+                    </Hint>
+                    <Hint>
+                      Atajos: B pincel · W varita · E quitar · R mantener · [ ]
+                      tamaño.
+                    </Hint>
                   </div>
-                </TabsContent>
+                </PanelSection>
 
-                <TabsContent value="export" className="space-y-3">
-                  <div className="space-y-1.5">
-                    <Label>Formato</Label>
+                <PanelSection
+                  icon={Download}
+                  title="Descargar"
+                  summary={exportFormat.toUpperCase()}
+                  defaultOpen={false}
+                >
+                  <Field label="Formato" htmlFor="export-format">
                     <Select
                       value={exportFormat}
                       onValueChange={(value: string) =>
                         setExportFormat(value as ExportFormat)
                       }
                     >
-                      <SelectTrigger className="w-full">
+                      <SelectTrigger id="export-format" className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1758,16 +2196,10 @@ export function ImageTool() {
                         <SelectItem value="ico">ICO (icono 256px)</SelectItem>
                       </SelectContent>
                     </Select>
-                  </div>
+                  </Field>
 
                   {exportFormat === "jpeg" || exportFormat === "webp" ? (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Calidad</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {exportQuality}%
-                        </span>
-                      </div>
+                    <Field label="Calidad" value={`${exportQuality}%`}>
                       <Slider
                         min={40}
                         max={100}
@@ -1777,153 +2209,142 @@ export function ImageTool() {
                           setExportQuality(values[0])
                         }
                       />
-                    </div>
+                    </Field>
                   ) : null}
 
-                  <p className="text-[11px] text-muted-foreground">
+                  <Hint>
                     Guarda el resultado con tus cambios (recorte, giro, fondo).
-                  </p>
+                  </Hint>
+                  <Hint>
+                    {estimatedSize !== null
+                      ? `Peso estimado: ${formatBytes(estimatedSize)}`
+                      : "Calculando peso estimado…"}
+                  </Hint>
 
                   <Button className="w-full" onClick={handleExportImage}>
                     <Download className="size-4" />
-                    Descargar
+                    Descargar {exportFormat.toUpperCase()}
                   </Button>
-                </TabsContent>
-              </Tabs>
-            </div>
-          ) : null}
+                </PanelSection>
+              </>
+            ) : (
+              <>
+                <PanelSection
+                  icon={Palette}
+                  title="Colores"
+                  summary={
+                    allLayers.length > 0
+                      ? `${visibleLayers.length}/${allLayers.length}`
+                      : usesColorPalette
+                        ? traceSettings.numberofcolors
+                        : "Silueta"
+                  }
+                >
+                  <Field label="Modo" htmlFor="trace-mode">
+                    <Select
+                      value={traceSettings.mode}
+                      onValueChange={(value: string) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          mode: value as TraceSettings["mode"],
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="trace-mode" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="color">Color</SelectItem>
+                        <SelectItem value="mono">
+                          Monocromo (silueta)
+                        </SelectItem>
+                        <SelectItem value="mono-invert">
+                          Monocromo invertido
+                        </SelectItem>
+                        <SelectItem value="negative">Negativo</SelectItem>
+                        <SelectItem value="grayscale">
+                          Escala de grises
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
 
-          {tab === "vector" ? (
-            <div
-              id="step-panel-vector"
-              role="region"
-              aria-labelledby="step-tab-vector"
-              className="mt-4 space-y-4"
-            >
-              <Tabs
-                value={vectorSection}
-                onValueChange={(value: string) =>
-                  setVectorSection(value as VectorSection)
-                }
-                className="gap-4"
-              >
-                <TabsList className="grid w-full grid-cols-3">
-                  <TabsTrigger value="style">Estilo</TabsTrigger>
-                  <TabsTrigger value="detail">Detalle</TabsTrigger>
-                  <TabsTrigger value="export">Exportar</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="style" className="space-y-4">
-                  <div className="space-y-3">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Palette className="size-3.5" />
-                      Color
-                    </p>
-                    <div className="space-y-1.5">
-                      <Label>Modo</Label>
-                      <Select
-                        value={traceSettings.mode}
-                        onValueChange={(value: string) =>
+                  {usesColorPalette ? (
+                    <Field
+                      label="Cantidad de colores"
+                      value={
+                        allLayers.length > 0
+                          ? `${visibleLayers.length}/${allLayers.length}`
+                          : traceSettings.numberofcolors
+                      }
+                      hint={
+                        detectedColors > 0
+                          ? detectedColors > MAX_COLORS
+                            ? `La imagen tiene más de ${MAX_COLORS} colores distintos (tope del control). Más colores = más detalle y más peso.`
+                            : `Se detectaron ~${detectedColors} colores distintos. Más colores = más detalle y más peso.`
+                          : "Cuántos colores distintos tendrá el SVG."
+                      }
+                    >
+                      <Slider
+                        min={2}
+                        max={maxColors}
+                        step={1}
+                        value={[
+                          Math.min(traceSettings.numberofcolors, maxColors),
+                        ]}
+                        onValueChange={(values: number[]) =>
                           updateTraceSettings((settings) => ({
                             ...settings,
-                            mode: value as TraceSettings["mode"],
+                            numberofcolors: values[0],
                           }))
                         }
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="color">Color</SelectItem>
-                          <SelectItem value="mono">
-                            Monocromo (silueta)
-                          </SelectItem>
-                          <SelectItem value="mono-invert">
-                            Monocromo invertido
-                          </SelectItem>
-                          <SelectItem value="negative">Negativo</SelectItem>
-                          <SelectItem value="grayscale">
-                            Escala de grises
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                      />
+                    </Field>
+                  ) : null}
 
+                  {allLayers.length > 0 ? (
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label>
-                          {usesColorPalette ? "Colores" : "Colores detectados"}
-                        </Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {allLayers.length > 0
-                            ? `${visibleLayers.length}/${allLayers.length}`
-                            : usesColorPalette
-                              ? traceSettings.numberofcolors
-                              : null}
-                        </span>
+                      <Label>Paleta</Label>
+                      <ColorPalette
+                        layers={allLayers}
+                        excluded={excludedColors}
+                        onToggle={toggleColor}
+                        onSolo={soloColor}
+                      />
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={includeAllColors}
+                          disabled={excludedColors.size === 0}
+                        >
+                          <RotateCcw className="size-3.5" />
+                          Incluir todos
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={invertColors}
+                          title="Invertir la selección de colores"
+                        >
+                          <ArrowLeftRight className="size-3.5" />
+                          Invertir
+                        </Button>
                       </div>
-                      {usesColorPalette ? (
-                        <>
-                          <Slider
-                            min={2}
-                            max={maxColors}
-                            step={1}
-                            value={[
-                              Math.min(traceSettings.numberofcolors, maxColors),
-                            ]}
-                            onValueChange={(values: number[]) =>
-                              updateTraceSettings((settings) => ({
-                                ...settings,
-                                numberofcolors: values[0],
-                              }))
-                            }
-                          />
-                          <p className="text-[11px] text-muted-foreground">
-                            {detectedColors > 0
-                              ? detectedColors > MAX_COLORS
-                                ? `La imagen tiene más de ${MAX_COLORS} colores distintos (tope del control).`
-                                : `Se detectaron ~${detectedColors} colores distintos (tope del control).`
-                              : "Cuántos colores distintos tendrá el SVG."}{" "}
-                            Más colores = más detalle y más peso.
-                          </p>
-                        </>
-                      ) : null}
-                      {allLayers.length > 0 ? (
-                        <>
-                          <ColorPalette
-                            layers={allLayers}
-                            excluded={excludedColors}
-                            onToggle={toggleColor}
-                          />
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="w-full"
-                            onClick={includeAllColors}
-                            disabled={excludedColors.size === 0}
-                          >
-                            <RotateCcw className="size-3.5" />
-                            Incluir todos los colores
-                          </Button>
-                        </>
-                      ) : (
-                        <p className="text-[11px] text-muted-foreground">
-                          {tracing
-                            ? "Vectorizando…"
-                            : "Aún no hay colores detectados."}
-                        </p>
-                      )}
                     </div>
-                  </div>
+                  ) : (
+                    <Hint>
+                      {tracing
+                        ? "Vectorizando…"
+                        : "Aún no hay colores detectados."}
+                    </Hint>
+                  )}
 
                   <Separator />
 
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                        <Sparkles className="size-3.5" />
-                        Estilo rápido
-                      </p>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <GroupLabel icon={Sparkles}>Estilo rápido</GroupLabel>
                       {activePreset ? (
                         <span className="text-[11px] text-muted-foreground">
                           {TRACE_PRESET_LABELS[activePreset]}
@@ -1947,317 +2368,250 @@ export function ImageTool() {
                         )
                       )}
                     </div>
-                    <p className="text-[11px] text-muted-foreground">
-                      Ajusta forma, bordes y detalle de una sola vez.
-                    </p>
+                    <Hint>Ajusta forma, bordes y detalle de una vez.</Hint>
                   </div>
-                </TabsContent>
+                </PanelSection>
 
-                <TabsContent value="detail" className="space-y-4">
-                  <div className="space-y-3">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <SlidersHorizontal className="size-3.5" />
-                      Forma
-                    </p>
+                <PanelSection
+                  icon={SlidersHorizontal}
+                  title="Detalle"
+                  summary={
+                    traceSettings.engine === "hq" ? "Alta definición" : "Rápido"
+                  }
+                  defaultOpen={false}
+                >
+                  <Field
+                    label="Motor"
+                    value={
+                      traceSettings.engine === "hq"
+                        ? "Alta definición"
+                        : "Rápido"
+                    }
+                  >
+                    <SegmentedControl
+                      label="Motor de vectorización"
+                      value={traceSettings.engine}
+                      onValueChange={(value) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          engine: value,
+                        }))
+                      }
+                      options={[
+                        { value: "fast", label: "Rápido" },
+                        { value: "hq", label: "Alta definición" },
+                      ]}
+                    />
+                  </Field>
+                  <Hint>
+                    Alta definición (Potrace) produce curvas más limpias, ideal
+                    para logos y dibujos de pocos colores. Rápido usa el motor
+                    anterior.
+                  </Hint>
 
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Motor</Label>
-                        <span className="text-xs text-muted-foreground">
-                          {traceSettings.engine === "hq" ? "Alta definición" : "Rápido"}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={traceSettings.engine === "fast" ? "default" : "outline"}
-                          aria-pressed={traceSettings.engine === "fast"}
-                          onClick={() =>
-                            updateTraceSettings((settings) => ({ ...settings, engine: "fast" }))
-                          }
-                        >
-                          Rápido
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={traceSettings.engine === "hq" ? "default" : "outline"}
-                          aria-pressed={traceSettings.engine === "hq"}
-                          onClick={() =>
-                            updateTraceSettings((settings) => ({ ...settings, engine: "hq" }))
-                          }
-                        >
-                          Alta definición
-                        </Button>
-                      </div>
-                      <p className="text-[11px] text-muted-foreground">
-                        Alta definición (Potrace) produce curvas más limpias, ideal para logos y
-                        dibujos de pocos colores. Rápido usa el motor anterior.
-                      </p>
-                    </div>
+                  <Field
+                    label="Fidelidad de curvas"
+                    value={traceSettings.fidelity.toFixed(2)}
+                    hint="Bajo = contorno más fiel (más nodos). Alto = formas más geométricas y livianas."
+                  >
+                    <Slider
+                      min={0.05}
+                      max={3}
+                      step={0.05}
+                      value={[traceSettings.fidelity]}
+                      onValueChange={(values: number[]) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          fidelity: Math.round(values[0] * 100) / 100,
+                        }))
+                      }
+                    />
+                  </Field>
 
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Fidelidad de curvas</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.fidelity.toFixed(2)}
-                        </span>
-                      </div>
-                      <Slider
-                        min={0.05}
-                        max={3}
-                        step={0.05}
-                        value={[traceSettings.fidelity]}
-                        onValueChange={(values: number[]) =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            fidelity: Math.round(values[0] * 100) / 100,
-                          }))
-                        }
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        Bajo = contorno más fiel (bordes redondos, más nodos).
-                        Alto = formas más geométricas y livianas.
-                      </p>
-                    </div>
+                  <Field
+                    label="Simplificar trazos"
+                    value={traceSettings.pathomit}
+                    hint="Descarta formas más pequeñas que este valor (ruido). Súbelo para un SVG más liviano; bájalo para conservar detalles finos."
+                  >
+                    <Slider
+                      min={0}
+                      max={60}
+                      step={1}
+                      value={[traceSettings.pathomit]}
+                      onValueChange={(values: number[]) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          pathomit: values[0],
+                        }))
+                      }
+                    />
+                  </Field>
 
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Simplificar trazos</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.pathomit}
-                        </span>
-                      </div>
-                      <Slider
-                        min={0}
-                        max={60}
-                        step={1}
-                        value={[traceSettings.pathomit]}
-                        onValueChange={(values: number[]) =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            pathomit: values[0],
-                          }))
-                        }
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        Descarta formas más pequeñas que este valor (ruido).
-                        Súbelo para un SVG más ligero; bájalo para conservar
-                        detalles finos.
-                      </p>
-                    </div>
+                  <Field
+                    label="Precisión decimal"
+                    htmlFor="vector-precision"
+                    hint="Decimales de las coordenadas. Más precisión = bordes más finos y archivo algo más pesado."
+                  >
+                    <Select
+                      value={String(traceSettings.roundcoords)}
+                      onValueChange={(value: string) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          roundcoords: Number(value) as 0 | 1 | 2,
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="vector-precision" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">0 · trazos rectos</SelectItem>
+                        <SelectItem value="1">1 · equilibrado</SelectItem>
+                        <SelectItem value="2">2 · curvas suaves</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </PanelSection>
 
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label htmlFor="vector-precision">
-                          Precisión decimal
-                        </Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.roundcoords}
-                        </span>
-                      </div>
-                      <Select
-                        value={String(traceSettings.roundcoords)}
-                        onValueChange={(value: string) =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            roundcoords: Number(value) as 0 | 1 | 2,
-                          }))
-                        }
-                      >
-                        <SelectTrigger id="vector-precision" className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="0">0 · trazos rectos</SelectItem>
-                          <SelectItem value="1">1 · equilibrado</SelectItem>
-                          <SelectItem value="2">2 · curvas suaves</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <p className="text-[11px] text-muted-foreground">
-                        Decimales de las coordenadas. Más precisión = bordes más
-                        finos y archivo algo más pesado.
-                      </p>
-                    </div>
+                <PanelSection
+                  icon={Waves}
+                  title="Bordes"
+                  summary={`Suavizado ${traceSettings.blurradius}`}
+                  defaultOpen={false}
+                >
+                  <Field
+                    label="Suavizado"
+                    value={traceSettings.blurradius}
+                    hint="Difumina antes de vectorizar para bordes más suaves y limpios."
+                  >
+                    <Slider
+                      min={0}
+                      max={8}
+                      step={1}
+                      value={[traceSettings.blurradius]}
+                      onValueChange={(values: number[]) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          blurradius: values[0],
+                        }))
+                      }
+                    />
+                  </Field>
+
+                  <Field
+                    label="Umbral de suavizado"
+                    value={traceSettings.blurdelta}
+                    hint={
+                      traceSettings.blurradius === 0
+                        ? "Subí el Suavizado para activarlo."
+                        : "Cuánta diferencia de color se mezcla al difuminar. Alto = bordes más parejos."
+                    }
+                  >
+                    <Slider
+                      min={0}
+                      max={255}
+                      step={4}
+                      value={[traceSettings.blurdelta]}
+                      onValueChange={(values: number[]) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          blurdelta: values[0],
+                        }))
+                      }
+                      disabled={traceSettings.blurradius === 0}
+                    />
+                  </Field>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <ToggleButton
+                      active={traceSettings.rightangleenhance}
+                      onClick={() =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          rightangleenhance: !settings.rightangleenhance,
+                        }))
+                      }
+                    >
+                      Ángulos rectos
+                    </ToggleButton>
+                    <ToggleButton
+                      active={traceSettings.strokewidth > 0}
+                      onClick={() =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          strokewidth: settings.strokewidth > 0 ? 0 : 1,
+                        }))
+                      }
+                    >
+                      Sellar costuras
+                    </ToggleButton>
+                    <ToggleButton
+                      active={traceSettings.straighten}
+                      onClick={() =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          straighten: !settings.straighten,
+                        }))
+                      }
+                      className="col-span-2"
+                    >
+                      Enderezar trazos
+                    </ToggleButton>
                   </div>
+                  <Hint>
+                    Ángulos rectos fuerza esquinas a 90° (útil en planos).
+                    Sellar costuras tapa las líneas blancas entre colores.
+                    Enderezar trazos convierte las líneas casi rectas en rectas
+                    exactas.
+                  </Hint>
+                </PanelSection>
 
-                  <Separator />
+                <PanelSection
+                  icon={Layers}
+                  title="Fondo"
+                  summary={
+                    traceSettings.removeBackground ? "Descartado" : "Incluido"
+                  }
+                  defaultOpen={false}
+                >
+                  <ToggleButton
+                    active={traceSettings.removeBackground}
+                    onClick={() =>
+                      updateTraceSettings((settings) => ({
+                        ...settings,
+                        removeBackground: !settings.removeBackground,
+                      }))
+                    }
+                    className="w-full"
+                  >
+                    Descartar fondo por color
+                  </ToggleButton>
+                  <Hint>
+                    {traceSettings.removeBackground
+                      ? "El color del borde no se traza; los blancos internos se conservan."
+                      : "El fondo se traza como una forma más del SVG."}
+                  </Hint>
 
-                  <div className="space-y-3">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Waves className="size-3.5" />
-                      Bordes
-                    </p>
-
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Suavizado</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.blurradius}
-                        </span>
-                      </div>
-                      <Slider
-                        min={0}
-                        max={8}
-                        step={1}
-                        value={[traceSettings.blurradius]}
-                        onValueChange={(values: number[]) =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            blurradius: values[0],
-                          }))
-                        }
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        Difumina antes de vectorizar para bordes más suaves y
-                        limpios.
-                      </p>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label>Umbral de suavizado</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.blurdelta}
-                        </span>
-                      </div>
-                      <Slider
-                        min={0}
-                        max={255}
-                        step={4}
-                        value={[traceSettings.blurdelta]}
-                        onValueChange={(values: number[]) =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            blurdelta: values[0],
-                          }))
-                        }
-                        disabled={traceSettings.blurradius === 0}
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        {traceSettings.blurradius === 0
-                          ? "Subí el Suavizado para activarlo."
-                          : "Cuánta diferencia de color se mezcla al difuminar. Alto = bordes más parejos."}
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <Button
-                        size="sm"
-                        variant={
-                          traceSettings.rightangleenhance
-                            ? "default"
-                            : "outline"
-                        }
-                        aria-pressed={traceSettings.rightangleenhance}
-                        onClick={() =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            rightangleenhance: !settings.rightangleenhance,
-                          }))
-                        }
-                      >
-                        Ángulos rectos
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant={
-                          traceSettings.strokewidth > 0 ? "default" : "outline"
-                        }
-                        aria-pressed={traceSettings.strokewidth > 0}
-                        onClick={() =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            strokewidth: settings.strokewidth > 0 ? 0 : 1,
-                          }))
-                        }
-                      >
-                        Sellar costuras
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="col-span-2"
-                        variant={
-                          traceSettings.straighten ? "default" : "outline"
-                        }
-                        aria-pressed={traceSettings.straighten}
-                        onClick={() =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            straighten: !settings.straighten,
-                          }))
-                        }
-                      >
-                        Enderezar trazos
-                      </Button>
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">
-                      Ángulos rectos fuerza esquinas a 90° (útil en planos).
-                      Sellar costuras tapa las líneas blancas entre colores.
-                      Enderezar trazos convierte las líneas casi rectas en
-                      rectas exactas (ideal para dibujos con trazos rectos).
-                    </p>
-                  </div>
-
-                  <Separator />
-
-                  <div className="space-y-3">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Layers className="size-3.5" />
-                      Fondo
-                    </p>
-
-                    <div className="space-y-1.5">
-                      <Button
-                        size="sm"
-                        variant={
-                          traceSettings.removeBackground ? "default" : "outline"
-                        }
-                        aria-pressed={traceSettings.removeBackground}
-                        className="w-full"
-                        onClick={() =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            removeBackground: !settings.removeBackground,
-                          }))
-                        }
-                      >
-                        Descartar fondo por color
-                      </Button>
-                      <p className="text-[11px] text-muted-foreground">
-                        {traceSettings.removeBackground
-                          ? "El color del borde no se traza; los blancos internos se conservan."
-                          : "El fondo se traza como una forma más del SVG."}
-                      </p>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <Label htmlFor="vector-alpha">Umbral de fondo</Label>
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {traceSettings.alphaThreshold}
-                        </span>
-                      </div>
-                      <Slider
-                        id="vector-alpha"
-                        min={0}
-                        max={255}
-                        step={1}
-                        value={[traceSettings.alphaThreshold]}
-                        onValueChange={(values: number[]) =>
-                          updateTraceSettings((settings) => ({
-                            ...settings,
-                            alphaThreshold: values[0],
-                          }))
-                        }
-                      />
-                      <p className="text-[11px] text-muted-foreground">
-                        Súbelo si queda un fondo semitransparente; bájalo si
-                        desaparecen detalles finos.
-                      </p>
-                    </div>
-                  </div>
+                  <Field
+                    label="Umbral de fondo"
+                    htmlFor="vector-alpha"
+                    value={traceSettings.alphaThreshold}
+                    hint="Súbelo si queda un fondo semitransparente; bájalo si desaparecen detalles finos."
+                  >
+                    <Slider
+                      id="vector-alpha"
+                      min={0}
+                      max={255}
+                      step={1}
+                      value={[traceSettings.alphaThreshold]}
+                      onValueChange={(values: number[]) =>
+                        updateTraceSettings((settings) => ({
+                          ...settings,
+                          alphaThreshold: values[0],
+                        }))
+                      }
+                    />
+                  </Field>
 
                   <Separator />
 
@@ -2270,113 +2624,106 @@ export function ImageTool() {
                     <RotateCcw className="size-3.5" />
                     Restablecer ajustes
                   </Button>
-                </TabsContent>
+                </PanelSection>
 
-                <TabsContent value="export" className="space-y-3">
+                <PanelSection
+                  icon={Download}
+                  title="Descargar"
+                  summary="SVG y capas"
+                  defaultOpen={false}
+                >
                   <div className="space-y-2">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Scissors className="size-3.5" />
-                      Vector completo
-                    </p>
+                    <GroupLabel icon={Scissors}>Vector completo</GroupLabel>
                     {vectorFiles.length > 0 ? (
                       <FileList files={vectorFiles} />
                     ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Aún no hay un SVG para descargar.
-                      </p>
+                      <Hint>Aún no hay un SVG para descargar.</Hint>
                     )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={handleCopySvg}
+                      disabled={!visibleSvg}
+                    >
+                      <Copy className="size-3.5" />
+                      Copiar SVG
+                    </Button>
                   </div>
 
                   <Separator />
 
                   <div className="space-y-2">
-                    <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <Palette className="size-3.5" />
+                    <GroupLabel icon={Palette}>
                       Separado por colores
-                    </p>
+                    </GroupLabel>
                     {layerFiles.length > 0 ? (
                       <FileList
                         files={layerFiles}
                         onZip={handleDownloadAllLayers}
                       />
                     ) : (
-                      <p className="text-xs text-muted-foreground">
-                        Aún no hay capas para descargar.
-                      </p>
+                      <Hint>Aún no hay capas para descargar.</Hint>
                     )}
                   </div>
 
-                  <p className="text-[11px] text-muted-foreground">
-                    Solo se incluyen los colores activos.
-                  </p>
-                </TabsContent>
-              </Tabs>
-            </div>
-          ) : null}
+                  <Hint>Solo se incluyen los colores activos.</Hint>
+                </PanelSection>
 
-          {tab === "convert" ? (
-            <div
-              id="step-panel-convert"
-              role="region"
-              aria-labelledby="step-tab-convert"
-              className="mt-4 space-y-4"
-            >
-              <div className="space-y-1.5">
-                <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                  <Scissors className="size-3.5" />
-                  Continuar en otro módulo
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Lleva tu diseño a la herramienta que corresponda para
-                  terminar de prepararlo.
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  Se envían los {visibleLayers.length} color(es) activos.
-                </p>
-              </div>
-
-              <div className="grid gap-2">
-                <Button
-                  asChild
-                  variant="outline"
-                  className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
+                <PanelSection
+                  icon={ArrowUpRight}
+                  title="Enviar a"
+                  summary={`${visibleLayers.length} color(es)`}
+                  defaultOpen={false}
                 >
-                  <Link href="/tools/posavasos" onClick={handleSendToModule}>
-                    <Coffee className="size-5 shrink-0 text-primary" />
-                    <span className="flex flex-1 flex-col">
-                      <span className="text-sm font-medium">
-                        Convertir en posavasos
-                      </span>
-                      <span className="text-[11px] font-normal text-muted-foreground">
-                        Base circular con el diseño en relieve.
-                      </span>
-                    </span>
-                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                  </Link>
-                </Button>
+                  <Hint>
+                    Lleva el diseño al módulo 3D con los colores activos.
+                  </Hint>
+                  <div className="grid gap-2">
+                    <Button
+                      asChild
+                      variant="outline"
+                      className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
+                    >
+                      <Link href="/tools/posavasos" onClick={handleSendToModule}>
+                        <Coffee className="size-5 shrink-0 text-primary" />
+                        <span className="flex flex-1 flex-col">
+                          <span className="text-sm font-medium">
+                            Convertir en posavasos
+                          </span>
+                          <span className="text-[11px] font-normal text-muted-foreground">
+                            Base circular con el diseño en relieve.
+                          </span>
+                        </span>
+                        <ArrowUpRight className="size-4 shrink-0 text-muted-foreground" />
+                      </Link>
+                    </Button>
 
-                <Button
-                  asChild
-                  variant="outline"
-                  className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
-                >
-                  <Link href="/tools/llavero" onClick={handleSendToModule}>
-                    <KeyRound className="size-5 shrink-0 text-primary" />
-                    <span className="flex flex-1 flex-col">
-                      <span className="text-sm font-medium">
-                        Convertir en llavero
-                      </span>
-                      <span className="text-[11px] font-normal text-muted-foreground">
-                        Pieza compacta con anilla de sujeción.
-                      </span>
-                    </span>
-                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                  </Link>
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </div>
+                    <Button
+                      asChild
+                      variant="outline"
+                      className="h-auto justify-start gap-3 py-3 text-left whitespace-normal"
+                    >
+                      <Link href="/tools/llavero" onClick={handleSendToModule}>
+                        <KeyRound className="size-5 shrink-0 text-primary" />
+                        <span className="flex flex-1 flex-col">
+                          <span className="text-sm font-medium">
+                            Convertir en llavero
+                          </span>
+                          <span className="text-[11px] font-normal text-muted-foreground">
+                            Pieza compacta con anilla de sujeción.
+                          </span>
+                        </span>
+                        <ArrowUpRight className="size-4 shrink-0 text-muted-foreground" />
+                      </Link>
+                    </Button>
+                  </div>
+                </PanelSection>
+              </>
+            )}
+          </PanelTooltips>
+        </aside>
+
       </div>
     </div>
   );
