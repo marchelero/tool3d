@@ -7,7 +7,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type ReactNode,
 } from "react";
 import Link from "next/link";
 import Image from "next/image";
@@ -15,9 +14,6 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   Ban,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
   Circle,
   Coffee,
   Download,
@@ -25,12 +21,13 @@ import {
   Grid3x3,
   Hexagon,
   Image as ImageIcon,
+  Layers,
   LayoutGrid,
   Loader2,
+  Move,
   Octagon,
   Palette,
   RotateCcw,
-  Scaling,
   Shapes,
   SlidersHorizontal,
   Square,
@@ -43,7 +40,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   DEFAULT_COASTER_SETTINGS,
   buildCoaster,
@@ -73,14 +69,21 @@ import {
 } from "@/lib/3d/patterns";
 import { baseName } from "@/lib/image/download";
 import { splitSvgByColor } from "@/lib/image/trace";
+import {
+  Field,
+  GroupLabel,
+  Hint,
+  PanelSection,
+  PanelTooltips,
+  SegmentedControl,
+  ToggleButton,
+} from "@/components/tools/shared/panel";
 import { ModelViewer } from "./model-viewer";
 
 const DESCRIPTION =
   "Diseña un posavasos listo para imprimir: elegí la forma y el tamaño, sumá una imagen vectorizada o un patrón (grabado o en relieve), agregá un borde y exportá el modelo.";
 
 const BUILD_DELAY = 200;
-
-type PanelTab = "base" | "design";
 
 interface BuiltModel {
   key: string;
@@ -90,10 +93,14 @@ interface BuiltModel {
 
 const subscribeHandoff = () => () => {};
 
-const PLACEMENTS: { value: CoasterPlacement; label: string }[] = [
-  { value: "top", label: "Arriba" },
-  { value: "bottom", label: "Abajo" },
-  { value: "full", label: "Espesor completo" },
+const PLACEMENTS: {
+  value: CoasterPlacement;
+  label: string;
+  title: string;
+}[] = [
+  { value: "top", label: "Arriba", title: "Parte superior del posavasos" },
+  { value: "bottom", label: "Abajo", title: "Parte inferior del posavasos" },
+  { value: "full", label: "Completo", title: "Todo el espesor" },
 ];
 
 const SHAPES: { value: CoasterShape; label: string; icon: LucideIcon }[] = [
@@ -110,10 +117,10 @@ const DESIGN_KINDS: { value: DesignKind; label: string; icon: LucideIcon }[] = [
   { value: "mosaic", label: "Mosaico", icon: Grid3x3 },
 ];
 
-const DESIGN_MODES: { value: DesignMode; label: string }[] = [
-  { value: "engrave", label: "Grabado" },
-  { value: "raise", label: "Relieve" },
-  { value: "through", label: "Huecos" },
+const DESIGN_MODES: { value: DesignMode; label: string; title: string }[] = [
+  { value: "engrave", label: "Grabado", title: "Hundido, al ras del color" },
+  { value: "raise", label: "Relieve", title: "Sobresale de la superficie" },
+  { value: "through", label: "Huecos", title: "Atraviesa todas las capas" },
 ];
 
 const SIZE_PRESETS = [80, 90, 100, 120];
@@ -156,25 +163,9 @@ export function PosavasoTool() {
   const [built, setBuilt] = useState<BuiltModel | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [exporting, setExporting] = useState<"stl" | "3mf" | null>(null);
-  const [panel, setPanel] = useState<PanelTab>("base");
   const [expanded, setExpanded] = useState(false);
-  const [openPanels, setOpenPanels] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(PANEL_IDS.map((id) => [id, true]))
-  );
+  const [designExplicit, setDesignExplicit] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const togglePanel = useCallback((id: string) => {
-    setOpenPanels((current) => ({ ...current, [id]: !current[id] }));
-  }, []);
-
-  const allPanelsOpen = PANEL_IDS.every((id) => openPanels[id]);
-
-  const toggleAllPanels = useCallback(() => {
-    setOpenPanels((current) => {
-      const everyOpen = PANEL_IDS.every((id) => current[id]);
-      return Object.fromEntries(PANEL_IDS.map((id) => [id, !everyOpen]));
-    });
-  }, []);
 
   useEffect(() => {
     if (!expanded) return;
@@ -194,10 +185,12 @@ export function PosavasoTool() {
     [handoffLayers, svgLayers]
   );
 
-  // El diseño que llega desde la herramienta de Imagen se usa como "imagen"
-  // mientras el usuario no elija otro tipo de diseño.
+  // Lo que llega desde Imagen se usa como diseño mientras el usuario no elija
+  // otro tipo a mano (por ejemplo, "Sin diseño").
   const designKind: DesignKind =
-    settings.designKind === "none" && availableLayers.length > 0
+    settings.designKind === "none" &&
+    availableLayers.length > 0 &&
+    !designExplicit
       ? "image"
       : settings.designKind;
 
@@ -258,12 +251,21 @@ export function PosavasoTool() {
     setSettings((current) => ({ ...current, ...patch }));
   }, []);
 
+  const updateDesignKind = useCallback(
+    (kind: DesignKind) => {
+      setDesignExplicit(true);
+      updateSettings({ designKind: kind });
+    },
+    [updateSettings]
+  );
+
   const handleNew = useCallback(() => {
     clearPosavasosHandoff();
     setHandoffDismissed(true);
     setSvgLayers(null);
     setSvgName(null);
     setBuildError(null);
+    setDesignExplicit(false);
     setSettings(DEFAULT_COASTER_SETTINGS);
   }, []);
 
@@ -294,6 +296,7 @@ export function PosavasoTool() {
       setHandoffDismissed(true);
       setSvgLayers(parsed);
       setSvgName(baseName(file.name));
+      setDesignExplicit(true);
       setSettings((current) =>
         current.designKind === "none"
           ? { ...current, designKind: "image" }
@@ -346,10 +349,28 @@ export function PosavasoTool() {
     []
   );
 
-  const usingHandoff = !svgLayers && availableLayers.length > 0 && !handoffDismissed;
+  const usingHandoff =
+    !svgLayers && availableLayers.length > 0 && !handoffDismissed;
   const showsImage = designKind === "image" || designKind === "mosaic";
   const showsPattern = designKind === "pattern";
   const showsMosaic = designKind === "mosaic";
+  const shapeLabel =
+    SHAPES.find((shape) => shape.value === settings.shape)?.label ?? "";
+  const placementLabel =
+    PLACEMENTS.find((placement) => placement.value === settings.placement)
+      ?.label ?? "";
+  const baseHeightMm = settings.layers * settings.layerHeightMm;
+
+  const designSummary =
+    designKind === "mosaic"
+      ? `Mosaico · ${TILE_LABELS[settings.mosaicKind]}`
+      : designKind === "image"
+        ? availableLayers.length > 0
+          ? `${availableLayers.length} color(es)`
+          : "Sin SVG"
+        : designKind === "pattern"
+          ? PATTERN_LABELS[settings.pattern]
+          : "Sin diseño";
 
   return (
     <div
@@ -382,7 +403,9 @@ export function PosavasoTool() {
                 ? `${availableLayers.length} color(es) desde ${sourceName}`
                 : designKind === "pattern"
                   ? `Patrón ${PATTERN_LABELS[settings.pattern]}`
-                  : "Modelo en blanco"}
+                  : designKind === "mosaic"
+                    ? `Mosaico ${TILE_LABELS[settings.mosaicKind]}`
+                    : "Modelo en blanco"}
               {model
                 ? ` · ${model.totalHeightMm.toFixed(2)} mm de alto`
                 : null}
@@ -398,37 +421,9 @@ export function PosavasoTool() {
               </Link>
             </Button>
           )}
-          {expanded ? null : (
-            <Button size="sm" variant="outline" onClick={handleNew}>
-              <RotateCcw className="size-4" />
-              Nuevo
-            </Button>
-          )}
-          <Button
-            size="sm"
-            disabled={!model || (!!exporting && exporting !== "stl")}
-            title="STL: geometría en un solo color (sin información de color)"
-            onClick={() => void handleExport("stl")}
-          >
-            {exporting === "stl" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Download className="size-4" />
-            )}
-            STL
-          </Button>
-          <Button
-            size="sm"
-            disabled={!model || (!!exporting && exporting !== "3mf")}
-            title="3MF: conserva el color de cada filamento (para imprimir a color)"
-            onClick={() => void handleExport("3mf")}
-          >
-            {exporting === "3mf" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Download className="size-4" />
-            )}
-            3MF
+          <Button size="sm" variant="outline" onClick={handleNew}>
+            <RotateCcw className="size-4" />
+            Nuevo
           </Button>
         </div>
       </header>
@@ -440,11 +435,11 @@ export function PosavasoTool() {
             : "grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]"
         }
       >
-              <div
-                className={
-                  expanded ? "flex min-h-0 flex-col" : "space-y-3 lg:sticky lg:top-8"
-                }
-              >
+        <div
+          className={
+            expanded ? "flex min-h-0 flex-col" : "space-y-3 lg:sticky lg:top-8"
+          }
+        >
           <div
             className={expanded ? "relative min-h-0 flex-1" : "relative"}
           >
@@ -551,637 +546,60 @@ export function PosavasoTool() {
           )}
         </div>
 
-        <div
+        <aside
+          aria-label="Controles del posavasos"
           className={
             expanded
-              ? "flex min-h-0 flex-col overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
-              : "space-y-4 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:overflow-y-auto lg:pr-1"
+              ? "min-h-0 space-y-3 overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
+              : "space-y-3 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:self-start lg:overflow-y-auto lg:pr-1"
           }
         >
-          <Tabs
-            value={panel}
-            onValueChange={(value: string) => setPanel(value as PanelTab)}
-            className="gap-4"
-          >
-            <div
-              className={
-                expanded
-                  ? "flex items-center gap-2"
-                  : "sticky -top-1 z-10 -mx-1 flex items-center gap-2 bg-background/95 px-1 py-2 backdrop-blur"
-              }
+          <PanelTooltips>
+            <PanelSection
+              icon={Shapes}
+              title="Forma"
+              summary={`${shapeLabel} · ${settings.widthMm.toFixed(0)} mm`}
             >
-              <TabsList className="grid h-9 flex-1 grid-cols-2">
-                <TabsTrigger value="base">Base</TabsTrigger>
-                <TabsTrigger value="design">Diseño</TabsTrigger>
-              </TabsList>
-              <Button
-                size="icon-sm"
-                variant="outline"
-                onClick={toggleAllPanels}
-                aria-label={
-                  allPanelsOpen
-                    ? "Contraer todas las secciones"
-                    : "Expandir todas las secciones"
+              <SegmentedControl
+                label="Forma del posavasos"
+                value={settings.shape}
+                onValueChange={(value) => updateSettings({ shape: value })}
+                columns={2}
+                options={SHAPES}
+              />
+
+              <NumberSlider
+                id="coaster-width"
+                label={
+                  settings.shape === "round"
+                    ? "Diámetro"
+                    : settings.shape === "square"
+                      ? "Lado"
+                      : "Ancho"
                 }
-                title={allPanelsOpen ? "Contraer todo" : "Expandir todo"}
-              >
-                {allPanelsOpen ? (
-                  <ChevronsDownUp className="size-4" />
-                ) : (
-                  <ChevronsUpDown className="size-4" />
-                )}
-              </Button>
-            </div>
+                value={settings.widthMm}
+                min={50}
+                max={140}
+                step={1}
+                unit="mm"
+                decimals={0}
+                onChange={(value) => updateSettings({ widthMm: value })}
+              />
 
-            <TabsContent value="design" className="space-y-2">
-              {designKind === "image" || showsPattern ? (
-                <div className="space-y-2.5 rounded-xl border bg-card p-3">
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <SlidersHorizontal className="size-3.5" />
-                    </span>
-                    <span className="flex-1 text-sm font-medium">Modo</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {
-                        DESIGN_MODES.find(
-                          (mode) => mode.value === settings.designMode
-                        )?.label
-                      }
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {DESIGN_MODES.map((mode) => (
-                      <Button
-                        key={mode.value}
-                        size="sm"
-                        variant={
-                          settings.designMode === mode.value
-                            ? "default"
-                            : "outline"
-                        }
-                        aria-pressed={settings.designMode === mode.value}
-                        onClick={() =>
-                          updateSettings({ designMode: mode.value })
-                        }
-                      >
-                        {mode.label}
-                      </Button>
-                    ))}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {settings.designMode === "raise"
-                      ? "El diseño sobresale por encima de la superficie."
-                      : settings.designMode === "through"
-                        ? "El diseño atraviesa todas las capas y deja huecos pasantes."
-                        : "El diseño queda hundido, al ras del color."}
-                  </p>
-                  {showsPattern && settings.designMode !== "through" ? (
-                    <Button
-                      size="sm"
-                      variant={settings.designInvert ? "default" : "outline"}
-                      aria-pressed={settings.designInvert}
-                      className="w-full"
-                      onClick={() =>
-                        updateSettings({ designInvert: !settings.designInvert })
-                      }
-                    >
-                      Invertir
-                    </Button>
-                  ) : null}
-                  {settings.designInvert && showsPattern ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      Ahora la red entre las celdas es la que sobresale (o se
-                      rebaja) y las celdas quedan como huecos.
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-              <Panel
-                id="design"
-                icon={Palette}
-                title="Diseño"
-                summary={
-                  designKind === "mosaic"
-                    ? `${TILE_LABELS[settings.mosaicKind]} ×${settings.mosaicTileMm} mm`
-                    : designKind === "image" && availableLayers.length > 0
-                      ? `${availableLayers.length} color(es)`
-                      : designKind === "pattern"
-                        ? PATTERN_LABELS[settings.pattern]
-                        : "en blanco"
-                }
-                open={openPanels.design}
-                onToggle={togglePanel}
-              >
-                <div className="grid grid-cols-3 gap-1.5">
-              {DESIGN_KINDS.map((kind) => {
-                const KindIcon = kind.icon;
-                const selected = designKind === kind.value;
-                return (
-                  <button
-                    key={kind.value}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => updateSettings({ designKind: kind.value })}
-                    className={`flex h-14 flex-col items-center justify-center gap-1 rounded-md border text-[11px] transition-colors ${
-                      selected
-                        ? "border-primary/60 bg-primary/10 text-primary"
-                        : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
-                    }`}
-                  >
-                    <KindIcon className="size-4" />
-                    {kind.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {showsImage ? (
-              <div className="space-y-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".svg,image/svg+xml"
-                  className="hidden"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) void handleSvgFile(file);
-                    event.target.value = "";
-                  }}
-                />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <FileUp className="size-4" />
-                  {availableLayers.length > 0 ? "Cambiar SVG" : "Cargar SVG"}
-                </Button>
-                {availableLayers.length > 0 ? (
-                  <div className="space-y-1.5">
-                    <p className="text-[11px] text-muted-foreground">
-                      {designKind === "mosaic"
-                        ? `${availableLayers.length} color(es) para el mosaico.`
-                        : usingHandoff
-                          ? `Enviado desde Imagen: ${availableLayers.length} color(es) de ${sourceName}.`
-                          : `${availableLayers.length} color(es) desde ${sourceName}.`}
-                    </p>
-                    <div className="flex flex-wrap gap-1">
-                      {availableLayers.map((layer) => (
-                        <span
-                          key={layer.color}
-                          className="size-4 rounded-sm border"
-                          style={{ backgroundColor: layer.color }}
-                          title={layer.color}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-                    <Coffee className="mt-0.5 size-3 shrink-0" />
-                    {designKind === "mosaic"
-                      ? "Cargá un SVG para repetirlo en mosaico sobre todo el posavasos."
-                      : "Cargá un SVG con colores o vectorizá una imagen y usá \"Convertir en posavasos\"."}
-                  </p>
-                )}
-              </div>
-            ) : null}
-
-            {showsPattern ? (
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs">Patrón</Label>
-                    <span className="text-[11px] text-muted-foreground">
-                      {PATTERN_LABELS[settings.pattern]}
-                    </span>
-                  </div>
-                  <div className="grid max-h-56 grid-cols-3 gap-1.5 overflow-y-auto pr-1">
-                    {patternPreviews.map((preview) => {
-                      const active = settings.pattern === preview.kind;
-                      return (
-                        <button
-                          key={preview.kind}
-                          type="button"
-                          title={preview.label}
-                          aria-label={preview.label}
-                          aria-pressed={active}
-                          onClick={() =>
-                            updateSettings({ pattern: preview.kind })
-                          }
-                          className={
-                            active
-                              ? "flex flex-col items-center gap-1 rounded-md border border-primary bg-primary/10 p-1.5"
-                              : "flex flex-col items-center gap-1 rounded-md border border-border bg-card p-1.5 hover:border-primary/40"
-                          }
-                        >
-                          <Image
-                            src={preview.url}
-                            alt=""
-                            width={32}
-                            height={32}
-                            unoptimized
-                            className="size-8 rounded-sm"
-                          />
-                          <span className="text-[10px] leading-none">
-                            {preview.label}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    El patrón cubre toda la superficie y se recorta al contorno
-                    del posavasos.
-                  </p>
-                </div>
-                <NumberSlider
-                  id="coaster-pattern-cell"
-                  label="Tamaño de celda"
-                  value={settings.patternCellMm}
-                  min={3}
-                  max={25}
-                  step={0.5}
-                  unit="mm"
-                  onChange={(value) =>
-                    updateSettings({ patternCellMm: value })
-                  }
-                />
-                <NumberSlider
-                  id="coaster-pattern-thickness"
-                  label="Grosor"
-                  value={settings.patternThicknessMm}
-                  min={0.5}
-                  max={6}
-                  step={0.1}
-                  unit="mm"
-                  onChange={(value) =>
-                    updateSettings({ patternThicknessMm: value })
-                  }
-                />
-                <div className="flex items-center justify-between gap-2">
-                  <Label htmlFor="coaster-pattern-color" className="text-xs">
-                    Color del patrón
-                  </Label>
-                  <input
-                    id="coaster-pattern-color"
-                    type="color"
-                    value={settings.patternColor}
-                    onChange={(event) =>
-                      updateSettings({ patternColor: event.target.value })
-                    }
-                    className="h-8 w-14 cursor-pointer rounded-md border bg-transparent"
-                  />
-                </div>
-              </div>
-            ) : null}
-
-              </Panel>
-              {designKind === "none" || showsMosaic ? null : (
-                <Panel
-                  id="placement"
-                  icon={Scaling}
-                  title="Posición y escala"
-                  summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
-                  open={openPanels.placement}
-                  onToggle={togglePanel}
-                >
-                  {settings.designMode === "through" ? null : (
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">Ubicación vertical</Label>
-                      <div className="grid grid-cols-3 gap-1.5">
-                        {PLACEMENTS.map((placement) => (
-                          <Button
-                            key={placement.value}
-                            size="sm"
-                            variant={
-                              settings.placement === placement.value
-                                ? "default"
-                                : "outline"
-                            }
-                            aria-pressed={
-                              settings.placement === placement.value
-                            }
-                            className="px-1 text-[11px]"
-                            onClick={() =>
-                              updateSettings({ placement: placement.value })
-                            }
-                          >
-                            {placement.label}
-                          </Button>
-                        ))}
-                      </div>
-                      {settings.placement !== "full" ? (
-                        <NumberSlider
-                          id="coaster-band-layers"
-                          label="Capas del relieve"
-                          value={settings.bandLayers}
-                          min={1}
-                          max={Math.max(1, settings.layers - 1)}
-                          step={1}
-                          decimals={0}
-                          onChange={(value) =>
-                            updateSettings({ bandLayers: value })
-                          }
-                        />
-                      ) : null}
-                    </div>
-                  )}
-
-                  <NumberSlider
-                    id="coaster-scale"
-                    label="Escala del diseño"
-                    value={settings.scalePercent}
-                    min={20}
-                    max={300}
-                    step={5}
-                    unit="%"
-                    decimals={0}
-                    hint="Podés pasar del 100%: lo que quede fuera del posavasos se recorta."
-                    onChange={(value) =>
-                      updateSettings({ scalePercent: value })
-                    }
-                  />
-
-                  <NumberSlider
-                    id="coaster-rotation"
-                    label="Rotación del diseño"
-                    value={settings.designRotation}
-                    min={0}
-                    max={345}
-                    step={15}
-                    unit="°"
-                    decimals={0}
-                    hint="Gira el diseño sobre el centro del posavasos."
-                    onChange={(value) =>
-                      updateSettings({ designRotation: value })
-                    }
-                  />
-                </Panel>
-              )}
-
-              {showsMosaic ? (
-                <Panel
-                  id="mosaic"
-                  icon={LayoutGrid}
-                  title="Mosaico"
-                  summary={`${TILE_LABELS[settings.mosaicKind]} · ${settings.mosaicTileMm} mm · ${
-                    DESIGN_MODES.find(
-                      (mode) => mode.value === settings.mosaicMode
-                    )?.label ?? ""
-                  }`}
-                  open={openPanels.mosaic}
-                  onToggle={togglePanel}
-                >
-                  {availableLayers.length === 0 ? (
-                    <p className="text-[11px] text-muted-foreground">
-                      Cargá un SVG para armar el mosaico.
-                    </p>
-                  ) : (
-                    <>
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs">Tipo de mosaico</Label>
-                          <span className="text-[11px] text-muted-foreground">
-                            {TILE_LABELS[settings.mosaicKind]}
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {tilePreviews.map((preview) => {
-                            const active =
-                              settings.mosaicKind === preview.kind;
-                            return (
-                              <button
-                                key={preview.kind}
-                                type="button"
-                                title={preview.label}
-                                aria-label={preview.label}
-                                aria-pressed={active}
-                                onClick={() =>
-                                  updateSettings({
-                                    mosaicKind: preview.kind,
-                                  })
-                                }
-                                className={
-                                  active
-                                    ? "flex flex-col items-center gap-1 rounded-md border border-primary bg-primary/10 p-1.5"
-                                    : "flex flex-col items-center gap-1 rounded-md border bg-card p-1.5 transition-colors hover:border-primary/50"
-                                }
-                              >
-                                <Image
-                                  src={preview.url}
-                                  alt={preview.label}
-                                  width={32}
-                                  height={32}
-                                  unoptimized
-                                  className="size-8 rounded-sm bg-white/70"
-                                />
-                                <span className="text-[10px] leading-none">
-                                  {preview.label}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      <NumberSlider
-                        id="coaster-mosaic-tile"
-                        label="Tamaño de la pieza"
-                        value={settings.mosaicTileMm}
-                        min={4}
-                        max={40}
-                        step={1}
-                        unit="mm"
-                        decimals={0}
-                        onChange={(value) =>
-                          updateSettings({ mosaicTileMm: value })
-                        }
-                      />
-
-                      <NumberSlider
-                        id="coaster-mosaic-gap"
-                        label="Separación"
-                        value={settings.mosaicGapMm}
-                        min={0}
-                        max={8}
-                        step={0.5}
-                        unit="mm"
-                        onChange={(value) =>
-                          updateSettings({ mosaicGapMm: value })
-                        }
-                      />
-
-                      <NumberSlider
-                        id="coaster-mosaic-rotation"
-                        label="Rotación del mosaico"
-                        value={settings.mosaicRotation}
-                        min={0}
-                        max={345}
-                        step={15}
-                        unit="°"
-                        decimals={0}
-                        hint="Gira el mosaico completo sobre el centro del posavasos."
-                        onChange={(value) =>
-                          updateSettings({ mosaicRotation: value })
-                        }
-                      />
-
-                      <div className="space-y-1.5">
-                        <Label className="text-xs">Modo del mosaico</Label>
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {DESIGN_MODES.map((mode) => (
-                            <Button
-                              key={mode.value}
-                              size="sm"
-                              variant={
-                                settings.mosaicMode === mode.value
-                                  ? "default"
-                                  : "outline"
-                              }
-                              aria-pressed={settings.mosaicMode === mode.value}
-                              onClick={() =>
-                                updateSettings({ mosaicMode: mode.value })
-                              }
-                            >
-                              {mode.label}
-                            </Button>
-                          ))}
-                        </div>
-                        <p className="text-[11px] text-muted-foreground">
-                          {settings.mosaicMode === "raise"
-                            ? "El mosaico sobresale por encima de la superficie."
-                            : settings.mosaicMode === "through"
-                              ? "El mosaico atraviesa todas las capas y deja huecos pasantes."
-                              : "El mosaico queda hundido, al ras del color."}
-                        </p>
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <Label className="text-xs">Ubicación del mosaico</Label>
-                        <div className="grid grid-cols-3 gap-1.5">
-                          {PLACEMENTS.map((placement) => (
-                            <Button
-                              key={placement.value}
-                              size="sm"
-                              variant={
-                                settings.mosaicPlacement === placement.value
-                                  ? "default"
-                                  : "outline"
-                              }
-                              aria-pressed={
-                                settings.mosaicPlacement === placement.value
-                              }
-                              className="px-1 text-[11px]"
-                              onClick={() =>
-                                updateSettings({
-                                  mosaicPlacement: placement.value,
-                                })
-                              }
-                            >
-                              {placement.label}
-                            </Button>
-                          ))}
-                        </div>
-                          {settings.mosaicPlacement !== "full" ? (
-                            <NumberSlider
-                              id="coaster-mosaic-layers"
-                              label="Capas del mosaico"
-                              value={settings.mosaicLayers}
-                              min={1}
-                              max={Math.max(1, settings.layers - 1)}
-                              step={1}
-                              decimals={0}
-                              onChange={(value) =>
-                                updateSettings({ mosaicLayers: value })
-                              }
-                            />
-                          ) : null}
-                      </div>
-                    </>
-                  )}
-                </Panel>
-              ) : null}
-            </TabsContent>
-
-            <TabsContent value="base" className="space-y-2">
-              <Panel
-                id="shape"
-                icon={Shapes}
-                title="Forma y medidas"
-                summary={`${SHAPES.find((shape) => shape.value === settings.shape)?.label} · ${settings.widthMm.toFixed(0)} mm · ${settings.layers} capas`}
-                open={openPanels.shape}
-                onToggle={togglePanel}
-              >
+              <div className="space-y-1.5">
+                <GroupLabel>Tamaños rápidos</GroupLabel>
                 <div className="grid grid-cols-4 gap-1.5">
-                  {SHAPES.map((shape) => {
-                    const ShapeIcon = shape.icon;
-                    const selected = settings.shape === shape.value;
-                    return (
-                      <button
-                        key={shape.value}
-                        type="button"
-                        aria-pressed={selected}
-                        aria-label={shape.label}
-                        title={shape.label}
-                        onClick={() => updateSettings({ shape: shape.value })}
-                        className={`flex h-12 items-center justify-center rounded-md border transition-colors ${
-                          selected
-                            ? "border-primary/60 bg-primary/10 text-primary"
-                            : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
-                        }`}
-                      >
-                        <ShapeIcon className="size-5" />
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {settings.shape === "square" ? (
-                  <NumberSlider
-                    id="coaster-corner"
-                    label="Redondeo de puntas"
-                    value={settings.cornerMm}
-                    min={2}
-                    max={Math.max(2, settings.widthMm / 2 - 2)}
-                    step={0.5}
-                    unit="mm"
-                    onChange={(value) => updateSettings({ cornerMm: value })}
-                  />
-                ) : null}
-
-                <NumberSlider
-                  id="coaster-width"
-                  label={
-                    settings.shape === "round"
-                      ? "Diámetro"
-                      : settings.shape === "square"
-                        ? "Lado"
-                        : "Ancho"
-                  }
-                  value={settings.widthMm}
-                  min={50}
-                  max={140}
-                  step={1}
-                  unit="mm"
-                  decimals={0}
-                  onChange={(value) => updateSettings({ widthMm: value })}
-                />
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-[11px] text-muted-foreground">
-                    Tamaño:
-                  </span>
                   {SIZE_PRESETS.map((preset) => {
                     const active = Math.round(settings.widthMm) === preset;
                     return (
                       <button
                         key={preset}
                         type="button"
+                        title={`${preset} mm`}
+                        aria-label={`${preset} mm`}
                         aria-pressed={active}
                         onClick={() => updateSettings({ widthMm: preset })}
-                        className={`rounded-full border px-2 py-0.5 text-[11px] tabular-nums transition-colors ${
+                        className={`h-7 rounded-md border text-[11px] tabular-nums transition-colors ${
                           active
                             ? "border-primary/60 bg-primary/10 text-primary"
                             : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1192,50 +610,351 @@ export function PosavasoTool() {
                     );
                   })}
                 </div>
+              </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="coaster-layers" className="text-xs">
-                      Capas totales
-                    </Label>
-                    <Input
-                      id="coaster-layers"
-                      type="number"
-                      min={2}
-                      max={60}
-                      value={settings.layers}
-                      onChange={(event) =>
-                        updateSettings({
-                          layers: Math.max(
-                            2,
-                            Math.min(60, Number(event.target.value) || 2)
-                          ),
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="coaster-layer-height" className="text-xs">
-                      Altura de capa (mm)
-                    </Label>
-                    <Input
-                      id="coaster-layer-height"
-                      type="number"
-                      min={0.06}
-                      max={0.4}
-                      step={0.02}
-                      value={settings.layerHeightMm}
-                      onChange={(event) =>
-                        updateSettings({
-                          layerHeightMm: Math.max(
-                            0.06,
-                            Math.min(0.4, Number(event.target.value) || 0.2)
-                          ),
-                        })
-                      }
-                    />
-                  </div>
+              {settings.shape === "square" ? (
+                <NumberSlider
+                  id="coaster-corner"
+                  label="Redondeo de puntas"
+                  value={settings.cornerMm}
+                  min={2}
+                  max={Math.max(2, settings.widthMm / 2 - 2)}
+                  step={0.5}
+                  unit="mm"
+                  onChange={(value) => updateSettings({ cornerMm: value })}
+                />
+              ) : null}
+            </PanelSection>
+
+            <PanelSection
+              icon={Layers}
+              title="Capas"
+              summary={`${settings.layers} × ${settings.layerHeightMm} mm`}
+            >
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Capas totales" htmlFor="coaster-layers">
+                  <Input
+                    id="coaster-layers"
+                    type="number"
+                    min={2}
+                    max={60}
+                    value={settings.layers}
+                    onChange={(event) =>
+                      updateSettings({
+                        layers: Math.max(
+                          2,
+                          Math.min(60, Number(event.target.value) || 2)
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+                <Field
+                  label="Altura de capa"
+                  htmlFor="coaster-layer-height"
+                  value={`${settings.layerHeightMm.toFixed(2)} mm`}
+                >
+                  <Input
+                    id="coaster-layer-height"
+                    type="number"
+                    min={0.06}
+                    max={0.4}
+                    step={0.02}
+                    value={settings.layerHeightMm}
+                    onChange={(event) =>
+                      updateSettings({
+                        layerHeightMm: Math.max(
+                          0.06,
+                          Math.min(0.4, Number(event.target.value) || 0.2)
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+              </div>
+              <Hint>
+                Altura base aproximada: {baseHeightMm.toFixed(2)} mm. El borde y
+                el relieve pueden sumar altura.
+              </Hint>
+            </PanelSection>
+
+            <PanelSection
+              icon={SlidersHorizontal}
+              title="Diseño"
+              summary={designSummary}
+            >
+              <SegmentedControl
+                label="Tipo de diseño"
+                value={designKind}
+                onValueChange={updateDesignKind}
+                columns={2}
+                options={DESIGN_KINDS}
+              />
+
+              {showsImage ? (
+                <div className="space-y-2.5">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".svg,image/svg+xml"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void handleSvgFile(file);
+                      event.target.value = "";
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <FileUp className="size-4" />
+                    {availableLayers.length > 0 ? "Cambiar SVG" : "Cargar SVG"}
+                  </Button>
+
+                  {availableLayers.length > 0 ? (
+                    <div className="space-y-1.5 rounded-lg bg-muted/40 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="truncate text-[11px] text-muted-foreground">
+                          {designKind === "mosaic"
+                            ? "Colores para el mosaico"
+                            : usingHandoff
+                              ? `Enviado desde Imagen · ${sourceName}`
+                              : sourceName}
+                        </p>
+                        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                          {availableLayers.length} color(es)
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {availableLayers.map((layer) => (
+                          <span
+                            key={layer.color}
+                            className="size-4 rounded-sm border"
+                            style={{ backgroundColor: layer.color }}
+                            title={layer.color}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="flex items-start gap-1.5 text-[11px] leading-snug text-muted-foreground">
+                      <Coffee className="mt-0.5 size-3 shrink-0" />
+                      {designKind === "mosaic"
+                        ? "Cargá un SVG para repetirlo en mosaico sobre todo el posavasos."
+                        : "Cargá un SVG con colores o vectorizá una imagen y usá «Convertir en posavasos»."}
+                    </p>
+                  )}
                 </div>
+              ) : null}
+
+              {showsPattern ? (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <GroupLabel>Motivo</GroupLabel>
+                      <span className="text-[11px] text-muted-foreground">
+                        {PATTERN_LABELS[settings.pattern]}
+                      </span>
+                    </div>
+                    <div className="grid max-h-52 grid-cols-3 gap-1.5 overflow-y-auto pr-1">
+                      {patternPreviews.map((preview) => {
+                        const active = settings.pattern === preview.kind;
+                        return (
+                          <button
+                            key={preview.kind}
+                            type="button"
+                            title={preview.label}
+                            aria-label={preview.label}
+                            aria-pressed={active}
+                            onClick={() =>
+                              updateSettings({ pattern: preview.kind })
+                            }
+                            className={
+                              active
+                                ? "flex flex-col items-center gap-1 rounded-md border border-primary bg-primary/10 p-1.5"
+                                : "flex flex-col items-center gap-1 rounded-md border border-border bg-card p-1.5 hover:border-primary/40"
+                            }
+                          >
+                            <Image
+                              src={preview.url}
+                              alt=""
+                              width={32}
+                              height={32}
+                              unoptimized
+                              className="size-8 rounded-sm"
+                            />
+                            <span className="text-[10px] leading-none">
+                              {preview.label}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <NumberSlider
+                    id="coaster-pattern-cell"
+                    label="Tamaño de celda"
+                    value={settings.patternCellMm}
+                    min={3}
+                    max={25}
+                    step={0.5}
+                    unit="mm"
+                    onChange={(value) =>
+                      updateSettings({ patternCellMm: value })
+                    }
+                  />
+
+                  <NumberSlider
+                    id="coaster-pattern-thickness"
+                    label="Grosor"
+                    value={settings.patternThicknessMm}
+                    min={0.5}
+                    max={6}
+                    step={0.1}
+                    unit="mm"
+                    onChange={(value) =>
+                      updateSettings({ patternThicknessMm: value })
+                    }
+                  />
+
+                  <Field label="Color del patrón" htmlFor="coaster-pattern-color">
+                    <input
+                      id="coaster-pattern-color"
+                      type="color"
+                      value={settings.patternColor}
+                      onChange={(event) =>
+                        updateSettings({ patternColor: event.target.value })
+                      }
+                      className="h-8 w-full cursor-pointer rounded-md border bg-transparent"
+                    />
+                  </Field>
+                </div>
+              ) : null}
+
+              {designKind === "none" ? (
+                <Hint>
+                  El posavasos queda liso. Elegí Imagen, Patrón o Mosaico para
+                  agregar un diseño.
+                </Hint>
+              ) : null}
+
+              {designKind === "image" || designKind === "pattern" ? (
+                <div className="space-y-2 border-t pt-3">
+                  <GroupLabel>Modo</GroupLabel>
+                  <SegmentedControl
+                    label="Modo del diseño"
+                    value={settings.designMode}
+                    onValueChange={(value) =>
+                      updateSettings({ designMode: value })
+                    }
+                    columns={3}
+                    options={DESIGN_MODES}
+                  />
+                  <Hint>
+                    {settings.designMode === "raise"
+                      ? "El diseño sobresale por encima de la superficie."
+                      : settings.designMode === "through"
+                        ? "El diseño atraviesa todas las capas y deja huecos pasantes."
+                        : "El diseño queda hundido, al ras del color."}
+                  </Hint>
+                  {showsPattern ? (
+                    <>
+                      <ToggleButton
+                        active={settings.designInvert}
+                        onClick={() =>
+                          updateSettings({
+                            designInvert: !settings.designInvert,
+                          })
+                        }
+                        className="w-full"
+                      >
+                        Invertir patrón
+                      </ToggleButton>
+                      {settings.designInvert ? (
+                        <Hint>
+                          La red entre las celdas es la que sobresale (o se
+                          rebaja) y las celdas quedan como huecos.
+                        </Hint>
+                      ) : null}
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+            </PanelSection>
+
+            {designKind === "image" || designKind === "pattern" ? (
+              <PanelSection
+                icon={Move}
+                title="Posición"
+                summary={`${placementLabel} · ${settings.scalePercent}% · ${settings.designRotation}°`}
+              >
+                {settings.designMode !== "through" ? (
+                  <div className="space-y-2">
+                    <GroupLabel>Ubicación vertical</GroupLabel>
+                    <SegmentedControl
+                      label="Ubicación vertical"
+                      value={settings.placement}
+                      onValueChange={(value) =>
+                        updateSettings({ placement: value })
+                      }
+                      columns={3}
+                      options={PLACEMENTS}
+                    />
+                    {settings.placement !== "full" ? (
+                      <NumberSlider
+                        id="coaster-band-layers"
+                        label="Capas del relieve"
+                        value={settings.bandLayers}
+                        min={1}
+                        max={Math.max(1, settings.layers - 1)}
+                        step={1}
+                        decimals={0}
+                        onChange={(value) =>
+                          updateSettings({ bandLayers: value })
+                        }
+                      />
+                    ) : null}
+                  </div>
+                ) : (
+                  <Hint>
+                    El diseño atraviesa todo el espesor; no hace falta elegir una
+                    ubicación vertical.
+                  </Hint>
+                )}
+
+                <NumberSlider
+                  id="coaster-scale"
+                  label="Escala del diseño"
+                  value={settings.scalePercent}
+                  min={20}
+                  max={300}
+                  step={5}
+                  unit="%"
+                  decimals={0}
+                  hint="Podés pasar del 100%: lo que quede fuera del posavasos se recorta."
+                  onChange={(value) =>
+                    updateSettings({ scalePercent: value })
+                  }
+                />
+
+                <NumberSlider
+                  id="coaster-rotation"
+                  label="Rotación del diseño"
+                  value={settings.designRotation}
+                  min={0}
+                  max={345}
+                  step={15}
+                  unit="°"
+                  decimals={0}
+                  hint="Gira el diseño sobre el centro del posavasos."
+                  onChange={(value) =>
+                    updateSettings({ designRotation: value })
+                  }
+                />
 
                 {designKind === "image" ? (
                   <NumberSlider
@@ -1250,107 +969,281 @@ export function PosavasoTool() {
                     onChange={(value) => updateSettings({ marginMm: value })}
                   />
                 ) : null}
-              </Panel>
+              </PanelSection>
+            ) : null}
 
-              <Panel
-                id="border"
-                icon={Palette}
-                title="Color y borde"
-                summary={
-                  settings.borderEnabled
-                    ? `${settings.baseColor} · borde ${settings.borderWidthMm.toFixed(1)} mm`
-                    : settings.baseColor
-                }
-                open={openPanels.border}
-                onToggle={togglePanel}
+            {showsMosaic ? (
+              <PanelSection
+                icon={Grid3x3}
+                title="Mosaico"
+                summary={`${TILE_LABELS[settings.mosaicKind]} · ${settings.mosaicTileMm} mm`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <Label htmlFor="coaster-base-color" className="text-xs">
-                    Color de la base
-                  </Label>
-                  <input
-                    id="coaster-base-color"
-                    type="color"
-                    value={settings.baseColor}
-                    onChange={(event) =>
-                      updateSettings({ baseColor: event.target.value })
-                    }
-                    className="h-8 w-14 cursor-pointer rounded-md border bg-transparent"
-                  />
-                </div>
+                {availableLayers.length === 0 ? (
+                  <Hint>
+                    Cargá un SVG en Diseño para armar el mosaico.
+                  </Hint>
+                ) : (
+                  <>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <GroupLabel>Pieza</GroupLabel>
+                        <span className="text-[11px] text-muted-foreground">
+                          {TILE_LABELS[settings.mosaicKind]}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {tilePreviews.map((preview) => {
+                          const active = settings.mosaicKind === preview.kind;
+                          return (
+                            <button
+                              key={preview.kind}
+                              type="button"
+                              title={preview.label}
+                              aria-label={preview.label}
+                              aria-pressed={active}
+                              onClick={() =>
+                                updateSettings({ mosaicKind: preview.kind })
+                              }
+                              className={
+                                active
+                                  ? "flex flex-col items-center gap-1 rounded-md border border-primary bg-primary/10 p-1.5"
+                                  : "flex flex-col items-center gap-1 rounded-md border bg-card p-1.5 transition-colors hover:border-primary/50"
+                              }
+                            >
+                              <Image
+                                src={preview.url}
+                                alt={preview.label}
+                                width={32}
+                                height={32}
+                                unoptimized
+                                className="size-8 rounded-sm bg-white/70"
+                              />
+                              <span className="text-[10px] leading-none">
+                                {preview.label}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
 
-                <div className="space-y-1.5">
-                  <Button
-                    size="sm"
-                    variant={settings.borderEnabled ? "default" : "outline"}
-                    aria-pressed={settings.borderEnabled}
-                    className="w-full"
-                    onClick={() =>
-                      updateSettings({ borderEnabled: !settings.borderEnabled })
-                    }
-                  >
-                    {settings.borderEnabled
-                      ? "Borde activado"
-                      : "Agregar borde elevado"}
-                  </Button>
-                  {settings.borderEnabled ? (
                     <NumberSlider
-                      id="coaster-border-width"
-                      label="Ancho del borde"
-                      value={settings.borderWidthMm}
-                      min={1}
-                      max={Math.max(2, settings.widthMm / 4)}
+                      id="coaster-mosaic-tile"
+                      label="Tamaño de la pieza"
+                      value={settings.mosaicTileMm}
+                      min={4}
+                      max={40}
+                      step={1}
+                      unit="mm"
+                      decimals={0}
+                      onChange={(value) =>
+                        updateSettings({ mosaicTileMm: value })
+                      }
+                    />
+
+                    <NumberSlider
+                      id="coaster-mosaic-gap"
+                      label="Separación"
+                      value={settings.mosaicGapMm}
+                      min={0}
+                      max={8}
                       step={0.5}
                       unit="mm"
                       onChange={(value) =>
-                        updateSettings({ borderWidthMm: value })
+                        updateSettings({ mosaicGapMm: value })
                       }
                     />
-                  ) : null}
-                  {settings.borderEnabled ? (
+
                     <NumberSlider
-                      id="coaster-border-layers"
-                      label="Altura del borde"
-                      value={settings.borderLayers}
-                      min={1}
-                      max={12}
-                      step={1}
-                      unit="capas"
+                      id="coaster-mosaic-rotation"
+                      label="Rotación del mosaico"
+                      value={settings.mosaicRotation}
+                      min={0}
+                      max={345}
+                      step={15}
+                      unit="°"
                       decimals={0}
+                      hint="Gira el mosaico completo sobre el centro del posavasos."
                       onChange={(value) =>
-                        updateSettings({ borderLayers: value })
+                        updateSettings({ mosaicRotation: value })
                       }
                     />
-                  ) : null}
-                </div>
-              </Panel>
-            </TabsContent>
-          </Tabs>
 
-          <Separator />
+                    <div className="space-y-2 border-t pt-3">
+                      <GroupLabel>Modo</GroupLabel>
+                      <SegmentedControl
+                        label="Modo del mosaico"
+                        value={settings.mosaicMode}
+                        onValueChange={(value) =>
+                          updateSettings({ mosaicMode: value })
+                        }
+                        columns={3}
+                        options={DESIGN_MODES}
+                      />
+                      <Hint>
+                        {settings.mosaicMode === "raise"
+                          ? "El mosaico sobresale por encima de la superficie."
+                          : settings.mosaicMode === "through"
+                            ? "El mosaico atraviesa todas las capas y deja huecos pasantes."
+                            : "El mosaico queda hundido, al ras del color."}
+                      </Hint>
+                    </div>
 
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full text-muted-foreground"
-            title="Vuelve forma, tamaño y capas a los valores por defecto (no borra el diseño)"
-            onClick={handleReset}
-          >
-            Restablecer medidas
-          </Button>
-        </div>
+                    <div className="space-y-2 border-t pt-3">
+                      <GroupLabel>Ubicación</GroupLabel>
+                      <SegmentedControl
+                        label="Ubicación del mosaico"
+                        value={settings.mosaicPlacement}
+                        onValueChange={(value) =>
+                          updateSettings({ mosaicPlacement: value })
+                        }
+                        columns={3}
+                        options={PLACEMENTS}
+                      />
+                      {settings.mosaicPlacement !== "full" ? (
+                        <NumberSlider
+                          id="coaster-mosaic-layers"
+                          label="Capas del mosaico"
+                          value={settings.mosaicLayers}
+                          min={1}
+                          max={Math.max(1, settings.layers - 1)}
+                          step={1}
+                          decimals={0}
+                          onChange={(value) =>
+                            updateSettings({ mosaicLayers: value })
+                          }
+                        />
+                      ) : null}
+                    </div>
+                  </>
+                )}
+              </PanelSection>
+            ) : null}
+
+            <PanelSection
+              icon={Palette}
+              title="Acabado"
+              summary={
+                settings.borderEnabled
+                  ? `${settings.baseColor} · borde ${settings.borderWidthMm.toFixed(1)} mm`
+                  : settings.baseColor
+              }
+            >
+              <Field label="Color de la base" htmlFor="coaster-base-color">
+                <input
+                  id="coaster-base-color"
+                  type="color"
+                  value={settings.baseColor}
+                  onChange={(event) =>
+                    updateSettings({ baseColor: event.target.value })
+                  }
+                  className="h-9 w-full cursor-pointer rounded-md border bg-transparent"
+                />
+              </Field>
+
+              <ToggleButton
+                active={settings.borderEnabled}
+                onClick={() =>
+                  updateSettings({ borderEnabled: !settings.borderEnabled })
+                }
+                icon={Square}
+                className="w-full"
+              >
+                Borde elevado
+              </ToggleButton>
+
+              {settings.borderEnabled ? (
+                <>
+                  <NumberSlider
+                    id="coaster-border-width"
+                    label="Ancho del borde"
+                    value={settings.borderWidthMm}
+                    min={1}
+                    max={Math.max(2, settings.widthMm / 4)}
+                    step={0.5}
+                    unit="mm"
+                    onChange={(value) =>
+                      updateSettings({ borderWidthMm: value })
+                    }
+                  />
+                  <NumberSlider
+                    id="coaster-border-layers"
+                    label="Altura del borde"
+                    value={settings.borderLayers}
+                    min={1}
+                    max={12}
+                    step={1}
+                    unit="capas"
+                    decimals={0}
+                    onChange={(value) =>
+                      updateSettings({ borderLayers: value })
+                    }
+                  />
+                </>
+              ) : null}
+            </PanelSection>
+
+            <PanelSection
+              icon={Download}
+              title="Exportar"
+              summary={
+                model
+                  ? `${model.colors.length + 1} filamento(s)`
+                  : "STL · 3MF"
+              }
+              defaultOpen={false}
+            >
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  size="sm"
+                  disabled={!model || (!!exporting && exporting !== "stl")}
+                  title="STL: geometría en un solo color (sin información de color)"
+                  onClick={() => void handleExport("stl")}
+                >
+                  {exporting === "stl" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Download className="size-4" />
+                  )}
+                  STL
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!model || (!!exporting && exporting !== "3mf")}
+                  title="3MF: conserva el color de cada filamento (para imprimir a color)"
+                  onClick={() => void handleExport("3mf")}
+                >
+                  {exporting === "3mf" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Download className="size-4" />
+                  )}
+                  3MF
+                </Button>
+              </div>
+              <Hint>
+                STL guarda solo la geometría. 3MF conserva el color de cada
+                pieza para imprimir a color.
+              </Hint>
+            </PanelSection>
+
+            <Separator />
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full text-muted-foreground"
+              title="Vuelve forma, tamaño y capas a los valores por defecto (no borra el diseño)"
+              onClick={handleReset}
+            >
+              Restablecer medidas
+            </Button>
+          </PanelTooltips>
+        </aside>
       </div>
     </div>
   );
 }
-
-const PANEL_IDS = [
-  "shape",
-  "border",
-  "design",
-  "placement",
-  "mosaic",
-] as const;
 
 function NumberSlider({
   id,
@@ -1427,56 +1320,7 @@ function NumberSlider({
         aria-label={label}
         onValueChange={([next]) => onChange(next)}
       />
-      {hint ? (
-        <p className="text-[11px] text-muted-foreground">{hint}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function Panel({
-  id,
-  title,
-  icon: Icon,
-  summary,
-  open,
-  onToggle,
-  children,
-}: {
-  id: string;
-  title: string;
-  icon: LucideIcon;
-  summary?: string;
-  open: boolean;
-  onToggle: (id: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <div className="overflow-hidden rounded-xl border bg-card">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => onToggle(id)}
-        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-accent/40"
-      >
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-          <Icon className="size-3.5" />
-        </span>
-        <span className="flex-1 text-sm font-medium">{title}</span>
-        {summary ? (
-          <span className="shrink-0 text-[11px] font-normal tabular-nums text-muted-foreground">
-            {summary}
-          </span>
-        ) : null}
-        <ChevronDown
-          className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-      {open ? (
-        <div className="space-y-3 border-t border-border/60 px-3 py-3">
-          {children}
-        </div>
-      ) : null}
+      {hint ? <Hint>{hint}</Hint> : null}
     </div>
   );
 }
