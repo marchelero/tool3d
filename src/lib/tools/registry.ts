@@ -50,7 +50,7 @@ export const TOOLS: ToolDefinition[] = [
   },
   {
     slug: "llavero",
-    name: "Llavero con imagen",
+    name: "Llavero",
     description:
       "Convierte tus diseños vectorizados en llaveros listos para imprimir en 3D.",
     category: "3d",

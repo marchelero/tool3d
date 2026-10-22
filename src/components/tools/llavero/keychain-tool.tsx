@@ -7,16 +7,12 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type ReactNode,
 } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
   ArrowLeft,
   Ban,
-  ChevronDown,
-  ChevronsDownUp,
-  ChevronsUpDown,
   Circle,
   CircleDot,
   Coffee,
@@ -39,6 +35,7 @@ import {
   Scaling,
   Shapes,
   Shield,
+  SlidersHorizontal,
   Square,
   Star,
   Trash2,
@@ -53,7 +50,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -97,25 +93,21 @@ import {
 } from "@/lib/3d/handoff";
 import { baseName } from "@/lib/image/download";
 import { splitSvgByColor } from "@/lib/image/trace";
+import {
+  Field,
+  GroupLabel,
+  Hint,
+  PanelSection,
+  PanelTooltips,
+  SegmentedControl,
+  ToggleButton,
+} from "@/components/tools/shared/panel";
 import { ModelViewer, type RingDrag } from "../posavasos/model-viewer";
 
 const DESCRIPTION =
   "Diseña un llavero plano listo para imprimir: elegí la forma, sumá una imagen vectorizada o hasta 3 líneas de texto, definí el estilo y la anilla, y exportá el modelo.";
 
 const BUILD_DELAY = 200;
-
-const PANEL_IDS = [
-  "shape",
-  "layers",
-  "design",
-  "image",
-  "text",
-  "placement",
-  "ring",
-  "border",
-] as const;
-
-type PanelTab = "forma" | "design" | "finish";
 
 interface BuiltModel {
   key: string;
@@ -247,26 +239,10 @@ export function KeychainTool() {
   const [built, setBuilt] = useState<BuiltModel | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [exporting, setExporting] = useState<"stl" | "3mf" | null>(null);
-  const [panel, setPanel] = useState<PanelTab>("forma");
   const [expanded, setExpanded] = useState(false);
   const [ringDragActive, setRingDragActive] = useState(false);
-  const [openPanels, setOpenPanels] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(PANEL_IDS.map((id) => [id, true]))
-  );
+  const [designExplicit, setDesignExplicit] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const togglePanel = useCallback((id: string) => {
-    setOpenPanels((current) => ({ ...current, [id]: !current[id] }));
-  }, []);
-
-  const allPanelsOpen = PANEL_IDS.every((id) => openPanels[id]);
-
-  const toggleAllPanels = useCallback(() => {
-    setOpenPanels((current) => {
-      const everyOpen = PANEL_IDS.every((id) => current[id]);
-      return Object.fromEntries(PANEL_IDS.map((id) => [id, !everyOpen]));
-    });
-  }, []);
 
   const handleLoadSystemFonts = async () => {
     setLoadingSystemFonts(true);
@@ -331,7 +307,9 @@ export function KeychainTool() {
   );
 
   const designKind: KeychainDesignKind =
-    settings.designKind === "none" && imageLayers.length > 0
+    settings.designKind === "none" &&
+    imageLayers.length > 0 &&
+    !designExplicit
       ? "image"
       : settings.designKind;
 
@@ -446,6 +424,14 @@ export function KeychainTool() {
     setSettings((current) => ({ ...current, ...patch }));
   }, []);
 
+  const updateDesignKind = useCallback(
+    (kind: KeychainDesignKind) => {
+      setDesignExplicit(true);
+      updateSettings({ designKind: kind });
+    },
+    [updateSettings]
+  );
+
   const ringCenterX = model?.ringCenter?.x ?? null;
   const ringCenterY = model?.ringCenter?.y ?? null;
 
@@ -509,6 +495,7 @@ export function KeychainTool() {
     setSvgLayers(null);
     setSvgName(null);
     setBuildError(null);
+    setDesignExplicit(false);
     setSettings(DEFAULT_KEYCHAIN_SETTINGS);
     setTextDraft(DEFAULT_KEYCHAIN_SETTINGS.textLines);
   }, []);
@@ -552,6 +539,7 @@ export function KeychainTool() {
       setHandoffDismissed(true);
       setSvgLayers(parsed);
       setSvgName(baseName(file.name));
+      setDesignExplicit(true);
       setSettings((current) =>
         current.designKind === "none"
           ? { ...current, designKind: "image" }
@@ -599,6 +587,18 @@ export function KeychainTool() {
         ? "Lado"
         : "Ancho";
   const hasHeight = HEIGHT_SHAPES.includes(settings.shape);
+  const designModeLabel =
+    DESIGN_MODES.find((mode) => mode.value === settings.designMode)?.label ??
+    "";
+  const designSummary =
+    designKind === "none"
+      ? "Sin diseño"
+      : designKind === "image"
+        ? imageLayers.length > 0
+          ? `${imageLayers.length} color(es)`
+          : "Sin SVG"
+        : `${settings.textLines.length} línea(s)`;
+  const baseHeightMm = settings.layers * settings.layerHeightMm;
 
   return (
     <div
@@ -619,7 +619,7 @@ export function KeychainTool() {
           <p className="text-sm font-medium">Llavero · vista ampliada</p>
         ) : (
           <div>
-            <Badge>Llaveros</Badge>
+            <Badge>Llavero</Badge>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight">
               Llavero
             </h1>
@@ -645,37 +645,9 @@ export function KeychainTool() {
               </Link>
             </Button>
           )}
-          {expanded ? null : (
-            <Button size="sm" variant="outline" onClick={handleNew}>
-              <RotateCcw className="size-4" />
-              Nuevo
-            </Button>
-          )}
-          <Button
-            size="sm"
-            disabled={!model || (!!exporting && exporting !== "stl")}
-            title="STL: geometría en un solo color (sin información de color)"
-            onClick={() => void handleExport("stl")}
-          >
-            {exporting === "stl" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Download className="size-4" />
-            )}
-            STL
-          </Button>
-          <Button
-            size="sm"
-            disabled={!model || (!!exporting && exporting !== "3mf")}
-            title="3MF: conserva el color de cada filamento (para imprimir a color)"
-            onClick={() => void handleExport("3mf")}
-          >
-            {exporting === "3mf" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Download className="size-4" />
-            )}
-            3MF
+          <Button size="sm" variant="outline" onClick={handleNew}>
+            <RotateCcw className="size-4" />
+            Nuevo
           </Button>
         </div>
       </header>
@@ -791,502 +763,22 @@ export function KeychainTool() {
           )}
         </div>
 
-        <div
+        <aside
+          aria-label="Controles del llavero"
           className={
             expanded
-              ? "flex min-h-0 flex-col overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
-              : "space-y-4 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:overflow-y-auto lg:pr-1"
+              ? "min-h-0 space-y-3 overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
+              : "space-y-3 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:self-start lg:overflow-y-auto lg:pr-1"
           }
         >
-          <Tabs
-            value={panel}
-            onValueChange={(value: string) => setPanel(value as PanelTab)}
-            className="gap-4"
-          >
-            <div
-              className={
-                expanded
-                  ? "flex items-center gap-2"
-                  : "sticky -top-1 z-10 -mx-1 flex items-center gap-2 bg-background/95 px-1 py-2 backdrop-blur"
-              }
+          <PanelTooltips>
+            <PanelSection
+              icon={Shapes}
+              title="Forma"
+              summary={`${SHAPE_LABELS[settings.shape]} · ${settings.widthMm.toFixed(0)} mm`}
             >
-                <TabsList className="grid h-9 flex-1 grid-cols-3">
-                  <TabsTrigger value="forma">Forma</TabsTrigger>
-                  <TabsTrigger value="design">Diseño</TabsTrigger>
-                  <TabsTrigger value="finish">Acabado</TabsTrigger>
-                </TabsList>
-              <Button
-                size="icon-sm"
-                variant="outline"
-                onClick={toggleAllPanels}
-                aria-label={
-                  allPanelsOpen
-                    ? "Contraer todas las secciones"
-                    : "Expandir todas las secciones"
-                }
-                title={allPanelsOpen ? "Contraer todo" : "Expandir todo"}
-              >
-                {allPanelsOpen ? (
-                  <ChevronsDownUp className="size-4" />
-                ) : (
-                  <ChevronsUpDown className="size-4" />
-                )}
-              </Button>
-            </div>
-
-            <TabsContent value="design" className="space-y-2">
-              <TabHint>
-                Sumá una imagen o hasta 3 líneas de texto, elegí cómo se ve y
-                ajustá su tamaño.
-              </TabHint>
-
-              <Panel
-                id="design"
-                icon={Type}
-                title="Contenido"
-                summary={
-                  showsImage && imageLayers.length > 0
-                    ? `${imageLayers.length} color(es)`
-                    : showsText
-                      ? `${settings.textLines.length} línea(s)`
-                      : "en blanco"
-                }
-                open={openPanels.design}
-                onToggle={togglePanel}
-              >
-                <div className="grid grid-cols-3 gap-1.5">
-                  {DESIGN_KINDS.map((kind) => {
-                    const KindIcon = kind.icon;
-                    const selected = designKind === kind.value;
-                    return (
-                      <button
-                        key={kind.value}
-                        type="button"
-                        aria-pressed={selected}
-                        onClick={() => updateSettings({ designKind: kind.value })}
-                        className={`flex h-14 flex-col items-center justify-center gap-1 rounded-md border text-[11px] transition-colors ${
-                          selected
-                            ? "border-primary/60 bg-primary/10 text-primary"
-                            : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
-                        }`}
-                      >
-                        <KindIcon className="size-4" />
-                        {kind.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </Panel>
-
-              {showsImage ? (
-                <Panel
-                  id="image"
-                  icon={ImageIcon}
-                  title="Imagen"
-                  summary={
-                    imageLayers.length > 0
-                      ? `${imageLayers.length} color(es)`
-                      : "sin archivo"
-                  }
-                  open={openPanels.image}
-                  onToggle={togglePanel}
-                >
-                  <div className="space-y-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".svg,image/svg+xml"
-                      className="hidden"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (file) void handleSvgFile(file);
-                        event.target.value = "";
-                      }}
-                    />
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="w-full"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <FileUp className="size-4" />
-                      {imageLayers.length > 0 ? "Cambiar SVG" : "Cargar SVG"}
-                    </Button>
-                    {imageLayers.length > 0 ? (
-                      <div className="space-y-1.5">
-                        <p className="text-[11px] text-muted-foreground">
-                          {usingHandoff
-                            ? `Enviado desde Imagen: ${imageLayers.length} color(es) de ${sourceName}.`
-                            : `${imageLayers.length} color(es) desde ${sourceName}.`}
-                        </p>
-                        <div className="flex flex-wrap gap-1">
-                          {imageLayers.map((layer, index) => (
-                            <span
-                              key={`${layer.color}-${index}`}
-                              className="size-4 rounded-sm border"
-                              style={{ backgroundColor: layer.color }}
-                              title={layer.color}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
-                        <Coffee className="mt-0.5 size-3 shrink-0" />
-                        Cargá un SVG con colores o vectorizá una imagen y usá
-                        &quot;Convertir en llavero&quot;.
-                      </p>
-                    )}
-                  </div>
-                  <div className="space-y-1.5 border-t border-border/60 pt-3">
-                    <Button
-                      size="sm"
-                      variant={settings.fillHoles ? "default" : "outline"}
-                      aria-pressed={settings.fillHoles}
-                      className="w-full"
-                      onClick={() =>
-                        updateSettings({ fillHoles: !settings.fillHoles })
-                      }
-                    >
-                      {settings.fillHoles
-                        ? "Huecos rellenados"
-                        : "Mantener huecos"}
-                    </Button>
-                    <p className="text-[11px] text-muted-foreground">
-                      Rellena los huecos internos del diseño (útil en formas
-                      finas).
-                    </p>
-                  </div>
-                </Panel>
-              ) : null}
-
-              {showsText ? (
-                <Panel
-                  id="text"
-                  icon={Type}
-                  title="Texto"
-                  summary={`${textDraft.length} línea(s)`}
-                  open={openPanels.text}
-                  onToggle={togglePanel}
-                >
-                  <div className="space-y-3">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">Fuente</Label>
-                      <Select
-                        value={activeFontId}
-                        onValueChange={handleFontChange}
-                      >
-                        <SelectTrigger size="sm" className="w-full">
-                          <SelectValue placeholder="Elegí una fuente" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            <SelectLabel>Incluidas</SelectLabel>
-                            {KEYCHAIN_FONTS.map((font) => (
-                              <SelectItem key={font.id} value={font.id}>
-                                {font.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                          {systemFonts.length > 0 ? (
-                            <SelectGroup>
-                              <SelectLabel>Del equipo</SelectLabel>
-                              {systemFonts.map((font) => (
-                                <SelectItem key={font.id} value={font.id}>
-                                  {font.label}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          ) : null}
-                        </SelectContent>
-                      </Select>
-                      {localFontsAvailable ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 px-2 text-[11px]"
-                            disabled={loadingSystemFonts}
-                            onClick={handleLoadSystemFonts}
-                          >
-                            {loadingSystemFonts ? (
-                              <Loader2 className="size-3.5 animate-spin" />
-                            ) : null}
-                            {systemFonts.length > 0
-                              ? `Recargar fuentes (${systemFonts.length})`
-                              : "Buscar fuentes del equipo"}
-                          </Button>
-                          {systemFonts.length > 0 ? (
-                            <span className="text-[11px] text-muted-foreground">
-                              Elegí una de &quot;Del equipo&quot; arriba
-                            </span>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <p className="text-[11px] text-muted-foreground">
-                          Tu navegador no permite leer las fuentes del equipo
-                          (probá Chrome o Edge).
-                        </p>
-                      )}
-                      {systemFontError ? (
-                        <p className="text-[11px] text-destructive">
-                          {systemFontError}
-                        </p>
-                      ) : null}
-                      {fontWarning ? (
-                        <p className="text-[11px] text-amber-600 dark:text-amber-500">
-                          {fontWarning}
-                        </p>
-                      ) : null}
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label className="text-xs">Líneas de texto</Label>
-                      {textDraft.map((line, index) => (
-                        <div
-                          key={index}
-                          className="space-y-1.5 rounded-lg border p-2"
-                        >
-                          <div className="flex items-center gap-1.5">
-                            <Input
-                              value={line.text}
-                              placeholder="Texto"
-                              onChange={(event) =>
-                                updateTextLine(index, { text: event.target.value })
-                              }
-                              className="h-8"
-                            />
-                            <input
-                              type="color"
-                              value={line.color}
-                              aria-label="Color del texto"
-                              onChange={(event) =>
-                                updateTextLine(index, { color: event.target.value })
-                              }
-                              className="h-8 w-9 shrink-0 cursor-pointer rounded-md border bg-transparent"
-                            />
-                            {textDraft.length > 1 ? (
-                              <Button
-                                size="icon-sm"
-                                variant="ghost"
-                                aria-label="Quitar línea"
-                                onClick={() => removeTextLine(index)}
-                              >
-                                <Trash2 className="size-4" />
-                              </Button>
-                            ) : null}
-                          </div>
-                          <NumberSlider
-                            id={`keychain-line-${index}-size`}
-                            label="Tamaño"
-                            value={line.sizeMm}
-                            min={4}
-                            max={30}
-                            step={0.5}
-                            unit="mm"
-                            onChange={(value) =>
-                              updateTextLine(index, { sizeMm: value })
-                            }
-                          />
-                        </div>
-                      ))}
-                      {textDraft.length < 3 ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="w-full"
-                          onClick={addTextLine}
-                        >
-                          <Plus className="size-4" />
-                          Agregar línea
-                        </Button>
-                      ) : null}
-                      <Button
-                        size="sm"
-                        className="w-full"
-                        disabled={!textDraftDirty}
-                        onClick={applyTextDraft}
-                      >
-                        <Wand2 className="size-4" />
-                        {textDraftDirty ? "Generar con este texto" : "Texto aplicado"}
-                      </Button>
-                      <p className="text-[11px] text-muted-foreground">
-                        El modelo se genera al tocar el botón, no mientras escribís.
-                      </p>
-                    </div>
-
-                    <NumberSlider
-                      id="keychain-text-spacing"
-                      label="Separación entre letras"
-                      value={settings.textLetterSpacingMm}
-                      min={0}
-                      max={6}
-                      step={0.25}
-                      unit="mm"
-                      onChange={(value) =>
-                        updateSettings({ textLetterSpacingMm: value })
-                      }
-                    />
-                    <NumberSlider
-                      id="keychain-text-gap"
-                      label="Separación entre líneas"
-                      value={settings.textLineGapMm}
-                      min={0}
-                      max={12}
-                      step={0.5}
-                      unit="mm"
-                      onChange={(value) =>
-                        updateSettings({ textLineGapMm: value })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5 border-t border-border/60 pt-3">
-                    <Button
-                      size="sm"
-                      variant={settings.fillHoles ? "default" : "outline"}
-                      aria-pressed={settings.fillHoles}
-                      className="w-full"
-                      onClick={() =>
-                        updateSettings({ fillHoles: !settings.fillHoles })
-                      }
-                    >
-                      {settings.fillHoles
-                        ? "Huecos rellenados"
-                        : "Mantener huecos"}
-                    </Button>
-                    <p className="text-[11px] text-muted-foreground">
-                      Rellena los huecos de las letras (por ejemplo o, a, e).
-                    </p>
-                  </div>
-                </Panel>
-              ) : null}
-
-              {showsDesign ? (
-                <div className="space-y-2.5 rounded-xl border bg-card p-3">
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Palette className="size-3.5" />
-                    </span>
-                    <span className="flex-1 text-sm font-medium">Estilo</span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {
-                        DESIGN_MODES.find(
-                          (mode) => mode.value === settings.designMode
-                        )?.label
-                      }
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {DESIGN_MODES.map((mode) => (
-                      <Button
-                        key={mode.value}
-                        size="sm"
-                        variant={
-                          settings.designMode === mode.value
-                            ? "default"
-                            : "outline"
-                        }
-                        aria-pressed={settings.designMode === mode.value}
-                        onClick={() => updateSettings({ designMode: mode.value })}
-                      >
-                        {mode.label}
-                      </Button>
-                    ))}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {DESIGN_MODES.find(
-                      (mode) => mode.value === settings.designMode
-                    )?.hint}
-                  </p>
-                  {layerColors.length > 1 &&
-                  settings.designMode === "layered" ? (
-                    <div className="space-y-1.5 border-t border-border/60 pt-2.5">
-                      <Label className="text-xs">Orden de capas</Label>
-                      <p className="text-[11px] text-muted-foreground">
-                        Arrastrá para ordenar. El primero va abajo; el último,
-                        arriba.
-                      </p>
-                      <LayerOrderList
-                        colors={layerColors}
-                        order={orderedIndexes}
-                        onReorder={setLayerOrder}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-
-              {showsDesign ? (
-                <Panel
-                  id="placement"
-                  icon={Scaling}
-                  title="Tamaño y posición"
-                  summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
-                  open={openPanels.placement}
-                  onToggle={togglePanel}
-                >
-                  {settings.designMode === "raise" ||
-                  settings.designMode === "flat" ||
-                  settings.designMode === "engrave" ? (
-                    <NumberSlider
-                      id="keychain-band-layers"
-                      label="Capas del relieve"
-                      value={settings.bandLayers}
-                      min={1}
-                      max={Math.max(1, settings.layers - 1)}
-                      step={1}
-                      decimals={0}
-                      onChange={(value) =>
-                        updateSettings({ bandLayers: value })
-                      }
-                    />
-                  ) : null}
-
-                  <NumberSlider
-                    id="keychain-scale"
-                    label="Tamaño del diseño"
-                    value={settings.scalePercent}
-                    min={20}
-                    max={300}
-                    step={5}
-                    unit="%"
-                    decimals={0}
-                    hint="100% = lo más grande que entra. Podés pasar del 100%: lo que quede fuera del llavero se recorta."
-                    onChange={(value) => updateSettings({ scalePercent: value })}
-                  />
-
-                  <NumberSlider
-                    id="keychain-rotation"
-                    label="Rotación del diseño"
-                    value={settings.designRotation}
-                    min={0}
-                    max={345}
-                    step={15}
-                    unit="°"
-                    decimals={0}
-                    hint="Gira el diseño sobre el centro del llavero."
-                    onChange={(value) =>
-                      updateSettings({ designRotation: value })
-                    }
-                  />
-                </Panel>
-              ) : null}
-            </TabsContent>
-
-            <TabsContent value="forma" className="space-y-2">
-              <TabHint>
-                Elegí la forma, el tamaño y la altura del llavero.
-              </TabHint>
-
-              <Panel
-                id="shape"
-                icon={Shapes}
-                title="Forma y tamaño"
-                summary={`${SHAPE_LABELS[settings.shape]} · ${settings.widthMm.toFixed(0)} mm · ${settings.layers} capas`}
-                open={openPanels.shape}
-                onToggle={togglePanel}
-              >
+              <div className="space-y-1.5">
+                <GroupLabel>Silueta</GroupLabel>
                 <div className="grid grid-cols-5 gap-1.5">
                   {SHAPES.map((shape) => {
                     const ShapeIcon = shape.icon;
@@ -1298,50 +790,54 @@ export function KeychainTool() {
                         aria-pressed={selected}
                         aria-label={SHAPE_LABELS[shape.value]}
                         title={SHAPE_LABELS[shape.value]}
-                        onClick={() => updateSettings({ shape: shape.value })}
-                        className={`flex h-11 items-center justify-center rounded-md border transition-colors ${
+                        onClick={() =>
+                          updateSettings({ shape: shape.value })
+                        }
+                        className={`flex h-10 items-center justify-center rounded-md border transition-colors ${
                           selected
                             ? "border-primary/60 bg-primary/10 text-primary"
-                            : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
+                            : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
                         }`}
                       >
-                        <ShapeIcon className="size-5" />
+                        <ShapeIcon className="size-4" />
                       </button>
                     );
                   })}
                 </div>
-                <p className="text-[11px] text-muted-foreground">
+                <Hint>
                   {SHAPE_LABELS[settings.shape]}
                   {settings.shape === "silhouette"
                     ? " · la forma sigue el contorno de la imagen."
                     : null}
-                </p>
+                </Hint>
+              </div>
 
-                <NumberSlider
-                  id="keychain-width"
-                  label={widthLabel}
-                  value={settings.widthMm}
-                  min={20}
-                  max={120}
-                  step={1}
-                  unit="mm"
-                  decimals={0}
-                  onChange={(value) => updateSettings({ widthMm: value })}
-                />
+              <NumberSlider
+                id="keychain-width"
+                label={widthLabel}
+                value={settings.widthMm}
+                min={20}
+                max={120}
+                step={1}
+                unit="mm"
+                decimals={0}
+                onChange={(value) => updateSettings({ widthMm: value })}
+              />
 
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-[11px] text-muted-foreground">
-                    Tamaño:
-                  </span>
+              <div className="space-y-1.5">
+                <GroupLabel>Tamaños rápidos</GroupLabel>
+                <div className="grid grid-cols-4 gap-1.5">
                   {SIZE_PRESETS.map((preset) => {
                     const active = Math.round(settings.widthMm) === preset;
                     return (
                       <button
                         key={preset}
                         type="button"
+                        title={`${preset} mm`}
+                        aria-label={`${preset} mm`}
                         aria-pressed={active}
                         onClick={() => updateSettings({ widthMm: preset })}
-                        className={`rounded-full border px-2 py-0.5 text-[11px] tabular-nums transition-colors ${
+                        className={`h-7 rounded-md border text-[11px] tabular-nums transition-colors ${
                           active
                             ? "border-primary/60 bg-primary/10 text-primary"
                             : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1352,376 +848,769 @@ export function KeychainTool() {
                     );
                   })}
                 </div>
+              </div>
 
-                {hasHeight ? (
+              {hasHeight ? (
+                <NumberSlider
+                  id="keychain-height"
+                  label="Alto"
+                  value={settings.heightMm}
+                  min={20}
+                  max={120}
+                  step={1}
+                  unit="mm"
+                  decimals={0}
+                  onChange={(value) => updateSettings({ heightMm: value })}
+                />
+              ) : null}
+
+              {settings.shape === "square" ||
+              settings.shape === "rectangle" ? (
+                <NumberSlider
+                  id="keychain-corner"
+                  label="Redondeo de puntas"
+                  value={settings.cornerMm}
+                  min={0}
+                  max={Math.max(
+                    1,
+                    Math.min(settings.widthMm, settings.heightMm) / 2 - 1
+                  )}
+                  step={0.5}
+                  unit="mm"
+                  onChange={(value) => updateSettings({ cornerMm: value })}
+                />
+              ) : null}
+
+              {settings.shape === "star" ? (
+                <>
                   <NumberSlider
-                    id="keychain-height"
-                    label="Alto"
-                    value={settings.heightMm}
-                    min={20}
-                    max={120}
+                    id="keychain-star-points"
+                    label="Puntas"
+                    value={settings.starPoints}
+                    min={3}
+                    max={12}
                     step={1}
-                    unit="mm"
                     decimals={0}
-                    onChange={(value) => updateSettings({ heightMm: value })}
+                    onChange={(value) =>
+                      updateSettings({ starPoints: value })
+                    }
                   />
-                ) : null}
-
-                {settings.shape === "square" ||
-                settings.shape === "rectangle" ? (
                   <NumberSlider
-                    id="keychain-corner"
-                    label="Redondeo de puntas"
-                    value={settings.cornerMm}
+                    id="keychain-star-inner"
+                    label="Profundidad de las puntas"
+                    value={settings.starInnerRatio}
+                    min={0.2}
+                    max={0.85}
+                    step={0.05}
+                    decimals={2}
+                    onChange={(value) =>
+                      updateSettings({ starInnerRatio: value })
+                    }
+                  />
+                </>
+              ) : null}
+
+              {settings.shape === "silhouette" ? (
+                <NumberSlider
+                  id="keychain-silhouette-offset"
+                  label="Reborde de la silueta"
+                  value={settings.silhouetteOffsetMm}
+                  min={1}
+                  max={10}
+                  step={0.5}
+                  unit="mm"
+                  onChange={(value) =>
+                    updateSettings({ silhouetteOffsetMm: value })
+                  }
+                />
+              ) : null}
+            </PanelSection>
+
+            <PanelSection
+              icon={Layers}
+              title="Capas"
+              summary={`${settings.layers} × ${settings.layerHeightMm} mm`}
+            >
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Capas totales" htmlFor="keychain-layers">
+                  <Input
+                    id="keychain-layers"
+                    type="number"
+                    min={2}
+                    max={60}
+                    value={settings.layers}
+                    onChange={(event) =>
+                      updateSettings({
+                        layers: Math.max(
+                          2,
+                          Math.min(60, Number(event.target.value) || 2)
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+                <Field
+                  label="Altura de capa"
+                  htmlFor="keychain-layer-height"
+                  value={`${settings.layerHeightMm.toFixed(2)} mm`}
+                >
+                  <Input
+                    id="keychain-layer-height"
+                    type="number"
+                    min={0.06}
+                    max={0.4}
+                    step={0.02}
+                    value={settings.layerHeightMm}
+                    onChange={(event) =>
+                      updateSettings({
+                        layerHeightMm: Math.max(
+                          0.06,
+                          Math.min(0.4, Number(event.target.value) || 0.2)
+                        ),
+                      })
+                    }
+                  />
+                </Field>
+              </div>
+              <Hint>
+                Altura base aproximada: {baseHeightMm.toFixed(2)} mm. Más capas
+                suman detalle al relieve.
+              </Hint>
+            </PanelSection>
+
+            <PanelSection
+              icon={SlidersHorizontal}
+              title="Diseño"
+              summary={designSummary}
+            >
+              <SegmentedControl
+                label="Tipo de diseño"
+                value={designKind}
+                onValueChange={updateDesignKind}
+                columns={3}
+                options={DESIGN_KINDS}
+              />
+
+              {showsImage ? (
+                <div className="space-y-2.5">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".svg,image/svg+xml"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void handleSvgFile(file);
+                      event.target.value = "";
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <FileUp className="size-4" />
+                    {imageLayers.length > 0 ? "Cambiar SVG" : "Cargar SVG"}
+                  </Button>
+                  {imageLayers.length > 0 ? (
+                    <div className="space-y-1.5 rounded-lg bg-muted/40 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="truncate text-[11px] text-muted-foreground">
+                          {usingHandoff
+                            ? `Enviado desde Imagen · ${sourceName}`
+                            : sourceName}
+                        </p>
+                        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                          {imageLayers.length} color(es)
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {imageLayers.map((layer, index) => (
+                          <span
+                            key={`${layer.color}-${index}`}
+                            className="size-4 rounded-sm border"
+                            style={{ backgroundColor: layer.color }}
+                            title={layer.color}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="flex items-start gap-1.5 text-[11px] leading-snug text-muted-foreground">
+                      <Coffee className="mt-0.5 size-3 shrink-0" />
+                      Cargá un SVG con colores o vectorizá una imagen y usá
+                      «Convertir en llavero».
+                    </p>
+                  )}
+                  <ToggleButton
+                    active={settings.fillHoles}
+                    onClick={() =>
+                      updateSettings({ fillHoles: !settings.fillHoles })
+                    }
+                    className="w-full"
+                  >
+                    {settings.fillHoles
+                      ? "Huecos rellenados"
+                      : "Mantener huecos"}
+                  </ToggleButton>
+                  <Hint>
+                    Rellena los huecos internos del diseño (útil en formas
+                    finas).
+                  </Hint>
+                </div>
+              ) : null}
+
+              {showsText ? (
+                <div className="space-y-3">
+                  <Field label="Fuente" htmlFor="keychain-font">
+                    <Select
+                      value={activeFontId}
+                      onValueChange={handleFontChange}
+                    >
+                      <SelectTrigger
+                        id="keychain-font"
+                        size="sm"
+                        className="w-full"
+                      >
+                        <SelectValue placeholder="Elegí una fuente" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectLabel>Incluidas</SelectLabel>
+                          {KEYCHAIN_FONTS.map((font) => (
+                            <SelectItem key={font.id} value={font.id}>
+                              {font.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                        {systemFonts.length > 0 ? (
+                          <SelectGroup>
+                            <SelectLabel>Del equipo</SelectLabel>
+                            {systemFonts.map((font) => (
+                              <SelectItem key={font.id} value={font.id}>
+                                {font.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        ) : null}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+
+                  {localFontsAvailable ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-[11px]"
+                        disabled={loadingSystemFonts}
+                        onClick={handleLoadSystemFonts}
+                      >
+                        {loadingSystemFonts ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : null}
+                        {systemFonts.length > 0
+                          ? `Recargar fuentes (${systemFonts.length})`
+                          : "Buscar fuentes del equipo"}
+                      </Button>
+                      {systemFonts.length > 0 ? (
+                        <span className="text-[11px] text-muted-foreground">
+                          Elegí una de «Del equipo»
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <Hint>
+                      Tu navegador no permite leer las fuentes del equipo (probá
+                      Chrome o Edge).
+                    </Hint>
+                  )}
+                  {systemFontError ? (
+                    <Hint className="text-destructive">{systemFontError}</Hint>
+                  ) : null}
+                  {fontWarning ? (
+                    <Hint className="text-amber-600 dark:text-amber-500">
+                      {fontWarning}
+                    </Hint>
+                  ) : null}
+
+                  <div className="space-y-2 border-t pt-3">
+                    <GroupLabel>Líneas de texto</GroupLabel>
+                    {textDraft.map((line, index) => (
+                      <div
+                        key={index}
+                        className="space-y-1.5 rounded-lg border p-2"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            value={line.text}
+                            placeholder="Texto"
+                            onChange={(event) =>
+                              updateTextLine(index, {
+                                text: event.target.value,
+                              })
+                            }
+                            className="h-8"
+                          />
+                          <input
+                            type="color"
+                            value={line.color}
+                            aria-label="Color del texto"
+                            onChange={(event) =>
+                              updateTextLine(index, {
+                                color: event.target.value,
+                              })
+                            }
+                            className="h-8 w-9 shrink-0 cursor-pointer rounded-md border bg-transparent"
+                          />
+                          {textDraft.length > 1 ? (
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              aria-label="Quitar línea"
+                              onClick={() => removeTextLine(index)}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          ) : null}
+                        </div>
+                        <NumberSlider
+                          id={`keychain-line-${index}-size`}
+                          label="Tamaño"
+                          value={line.sizeMm}
+                          min={4}
+                          max={30}
+                          step={0.5}
+                          unit="mm"
+                          onChange={(value) =>
+                            updateTextLine(index, { sizeMm: value })
+                          }
+                        />
+                      </div>
+                    ))}
+                    {textDraft.length < 3 ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="w-full"
+                        onClick={addTextLine}
+                      >
+                        <Plus className="size-4" />
+                        Agregar línea
+                      </Button>
+                    ) : null}
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      disabled={!textDraftDirty}
+                      onClick={applyTextDraft}
+                    >
+                      <Wand2 className="size-4" />
+                      {textDraftDirty
+                        ? "Generar con este texto"
+                        : "Texto aplicado"}
+                    </Button>
+                    <Hint>
+                      El modelo se genera al tocar el botón, no mientras
+                      escribís.
+                    </Hint>
+                  </div>
+
+                  <NumberSlider
+                    id="keychain-text-spacing"
+                    label="Separación entre letras"
+                    value={settings.textLetterSpacingMm}
                     min={0}
-                    max={Math.max(
-                      1,
-                      Math.min(settings.widthMm, settings.heightMm) / 2 - 1
-                    )}
+                    max={6}
+                    step={0.25}
+                    unit="mm"
+                    onChange={(value) =>
+                      updateSettings({ textLetterSpacingMm: value })
+                    }
+                  />
+                  <NumberSlider
+                    id="keychain-text-gap"
+                    label="Separación entre líneas"
+                    value={settings.textLineGapMm}
+                    min={0}
+                    max={12}
                     step={0.5}
                     unit="mm"
-                    onChange={(value) => updateSettings({ cornerMm: value })}
+                    onChange={(value) =>
+                      updateSettings({ textLineGapMm: value })
+                    }
+                  />
+
+                  <ToggleButton
+                    active={settings.fillHoles}
+                    onClick={() =>
+                      updateSettings({ fillHoles: !settings.fillHoles })
+                    }
+                    className="w-full"
+                  >
+                    {settings.fillHoles
+                      ? "Huecos rellenados"
+                      : "Mantener huecos"}
+                  </ToggleButton>
+                  <Hint>
+                    Rellena los huecos de las letras (por ejemplo o, a, e).
+                  </Hint>
+                </div>
+              ) : null}
+
+              {designKind === "none" ? (
+                <Hint>
+                  El llavero queda liso. Elegí Imagen o Texto para agregar un
+                  diseño.
+                </Hint>
+              ) : null}
+            </PanelSection>
+
+            {showsDesign ? (
+              <PanelSection
+                icon={Wand2}
+                title="Estilo"
+                summary={designModeLabel}
+              >
+                <SegmentedControl
+                  label="Estilo del diseño"
+                  value={settings.designMode}
+                  onValueChange={(value) =>
+                    updateSettings({ designMode: value })
+                  }
+                  columns={2}
+                  options={DESIGN_MODES}
+                />
+                <Hint>
+                  {
+                    DESIGN_MODES.find(
+                      (mode) => mode.value === settings.designMode
+                    )?.hint
+                  }
+                </Hint>
+
+                {layerColors.length > 1 &&
+                settings.designMode === "layered" ? (
+                  <div className="space-y-1.5 border-t pt-3">
+                    <GroupLabel>Orden de capas</GroupLabel>
+                    <Hint>
+                      Arrastrá para ordenar. El primero va abajo; el último,
+                      arriba.
+                    </Hint>
+                    <LayerOrderList
+                      colors={layerColors}
+                      order={orderedIndexes}
+                      onReorder={setLayerOrder}
+                    />
+                  </div>
+                ) : null}
+              </PanelSection>
+            ) : null}
+
+            {showsDesign ? (
+              <PanelSection
+                icon={Scaling}
+                title="Posición"
+                summary={`${settings.scalePercent}% · ${settings.designRotation}°`}
+              >
+                {settings.designMode !== "layered" ? (
+                  <NumberSlider
+                    id="keychain-band-layers"
+                    label="Capas del relieve"
+                    value={settings.bandLayers}
+                    min={1}
+                    max={Math.max(1, settings.layers - 1)}
+                    step={1}
+                    decimals={0}
+                    onChange={(value) =>
+                      updateSettings({ bandLayers: value })
+                    }
                   />
                 ) : null}
 
-                {settings.shape === "star" ? (
-                  <>
-                    <NumberSlider
-                      id="keychain-star-points"
-                      label="Puntas"
-                      value={settings.starPoints}
-                      min={3}
-                      max={12}
-                      step={1}
-                      decimals={0}
-                      onChange={(value) =>
-                        updateSettings({ starPoints: value })
-                      }
-                    />
-                    <NumberSlider
-                      id="keychain-star-inner"
-                      label="Profundidad de las puntas"
-                      value={settings.starInnerRatio}
-                      min={0.2}
-                      max={0.85}
-                      step={0.05}
-                      decimals={2}
-                      onChange={(value) =>
-                        updateSettings({ starInnerRatio: value })
-                      }
-                    />
-                  </>
-                ) : null}
+                <NumberSlider
+                  id="keychain-scale"
+                  label="Tamaño del diseño"
+                  value={settings.scalePercent}
+                  min={20}
+                  max={300}
+                  step={5}
+                  unit="%"
+                  decimals={0}
+                  hint="100% = lo más grande que entra. Podés pasar del 100%: lo que quede fuera del llavero se recorta."
+                  onChange={(value) =>
+                    updateSettings({ scalePercent: value })
+                  }
+                />
 
-                {settings.shape === "silhouette" ? (
+                <NumberSlider
+                  id="keychain-rotation"
+                  label="Rotación del diseño"
+                  value={settings.designRotation}
+                  min={0}
+                  max={345}
+                  step={15}
+                  unit="°"
+                  decimals={0}
+                  hint="Gira el diseño sobre el centro del llavero."
+                  onChange={(value) =>
+                    updateSettings({ designRotation: value })
+                  }
+                />
+              </PanelSection>
+            ) : null}
+
+            <PanelSection
+              icon={CircleDot}
+              title="Anilla"
+              summary={
+                settings.ringEnabled
+                  ? `agujero ${settings.ringHoleMm.toFixed(1)} mm`
+                  : "sin anilla"
+              }
+            >
+              <ToggleButton
+                active={settings.ringEnabled}
+                onClick={() =>
+                  updateSettings({ ringEnabled: !settings.ringEnabled })
+                }
+                icon={CircleDot}
+                className="w-full"
+              >
+                {settings.ringEnabled ? "Anilla activada" : "Agregar anilla"}
+              </ToggleButton>
+
+              {settings.ringEnabled ? (
+                <>
+                  <div className="space-y-1.5">
+                    <GroupLabel>Ubicación</GroupLabel>
+                    <SegmentedControl
+                      label="Ubicación de la anilla"
+                      value={settings.ringPlacement}
+                      onValueChange={(value) => {
+                        setRingDragActive(false);
+                        updateSettings({
+                          ringPlacement: value,
+                          ringPosX: null,
+                          ringPosY: null,
+                        });
+                      }}
+                      columns={2}
+                      options={RING_PLACEMENTS}
+                    />
+                  </div>
+
                   <NumberSlider
-                    id="keychain-silhouette-offset"
-                    label="Reborde de la silueta"
-                    value={settings.silhouetteOffsetMm}
-                    min={1}
+                    id="keychain-ring-hole"
+                    label="Diámetro del agujero"
+                    value={settings.ringHoleMm}
+                    min={2}
                     max={10}
                     step={0.5}
                     unit="mm"
                     onChange={(value) =>
-                      updateSettings({ silhouetteOffsetMm: value })
+                      updateSettings({ ringHoleMm: value })
                     }
                   />
-                ) : null}
+                  <NumberSlider
+                    id="keychain-ring-wall"
+                    label="Margen hasta el borde"
+                    value={settings.ringWallMm}
+                    min={1}
+                    max={8}
+                    step={0.5}
+                    unit="mm"
+                    onChange={(value) =>
+                      updateSettings({ ringWallMm: value })
+                    }
+                  />
 
-              </Panel>
-
-              <Panel
-                id="layers"
-                icon={Layers}
-                title="Altura y capas"
-                summary={`${settings.layers} capas · ${(
-                  settings.layers * settings.layerHeightMm
-                ).toFixed(2)} mm`}
-                open={openPanels.layers}
-                onToggle={togglePanel}
-              >
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="keychain-layers" className="text-xs">
-                      Capas totales
-                    </Label>
-                    <Input
-                      id="keychain-layers"
-                      type="number"
-                      min={2}
-                      max={60}
-                      value={settings.layers}
-                      onChange={(event) =>
-                        updateSettings({
-                          layers: Math.max(
-                            2,
-                            Math.min(60, Number(event.target.value) || 2)
-                          ),
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="keychain-layer-height" className="text-xs">
-                      Altura de capa (mm)
-                    </Label>
-                    <Input
-                      id="keychain-layer-height"
-                      type="number"
-                      min={0.06}
-                      max={0.4}
-                      step={0.02}
-                      value={settings.layerHeightMm}
-                      onChange={(event) =>
-                        updateSettings({
-                          layerHeightMm: Math.max(
-                            0.06,
-                            Math.min(0.4, Number(event.target.value) || 0.2)
-                          ),
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Más capas = más detalle en el relieve. La altura de capa define
-                  el salto de cada nivel.
-                </p>
-              </Panel>
-            </TabsContent>
-
-            <TabsContent value="finish" className="space-y-2">
-              <TabHint>
-                Ajustá la anilla, el color de la base y el borde elevado.
-              </TabHint>
-
-              <Panel
-                id="ring"
-                icon={CircleDot}
-                title="Anilla"
-                summary={
-                  settings.ringEnabled
-                    ? `agujero ${settings.ringHoleMm.toFixed(1)} mm`
-                    : "sin anilla"
-                }
-                open={openPanels.ring}
-                onToggle={togglePanel}
-              >
-                <Button
-                  size="sm"
-                  variant={settings.ringEnabled ? "default" : "outline"}
-                  aria-pressed={settings.ringEnabled}
-                  className="w-full"
-                  onClick={() =>
-                    updateSettings({ ringEnabled: !settings.ringEnabled })
-                  }
-                >
-                  {settings.ringEnabled ? "Anilla activada" : "Agregar anilla"}
-                </Button>
-                {settings.ringEnabled ? (
-                  <>
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">Ubicación</Label>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {RING_PLACEMENTS.map((option) => (
-                          <Button
-                            key={option.value}
-                            size="sm"
-                            variant={
-                              settings.ringPlacement === option.value
-                                ? "default"
-                                : "outline"
-                            }
-                            aria-pressed={
-                              settings.ringPlacement === option.value
-                            }
-                            onClick={() => {
-                              setRingDragActive(false);
-                              updateSettings({
-                                ringPlacement: option.value,
-                                ringPosX: null,
-                                ringPosY: null,
-                              });
-                            }}
-                          >
-                            {option.label}
-                          </Button>
-                        ))}
-                      </div>
-                    </div>
-                    <NumberSlider
-                      id="keychain-ring-hole"
-                      label="Diámetro del agujero"
-                      value={settings.ringHoleMm}
-                      min={2}
-                      max={10}
-                      step={0.5}
-                      unit="mm"
-                      onChange={(value) =>
-                        updateSettings({ ringHoleMm: value })
-                      }
-                    />
-                    <NumberSlider
-                      id="keychain-ring-wall"
-                      label="Margen hasta el borde"
-                      value={settings.ringWallMm}
-                      min={1}
-                      max={8}
-                      step={0.5}
-                      unit="mm"
-                      onChange={(value) =>
-                        updateSettings({ ringWallMm: value })
-                      }
-                    />
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <Button
-                        size="sm"
-                        variant={ringDragActive ? "default" : "outline"}
-                        aria-pressed={ringDragActive}
-                        onClick={() => setRingDragActive((value) => !value)}
-                      >
-                        <Move className="size-4" />
-                        {ringDragActive ? "Moviendo" : "Mover anilla"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={
-                          settings.ringPosX === null &&
-                          settings.ringPosY === null
-                        }
-                        onClick={() => {
-                          setRingDragActive(false);
-                          updateSettings({ ringPosX: null, ringPosY: null });
-                        }}
-                      >
-                        <RotateCcw className="size-4" />
-                        Centrar
-                      </Button>
-                    </div>
-                    {ringDragActive ? (
-                      <p className="text-[11px] text-muted-foreground">
-                        Mové el mouse sobre el modelo: verás la silueta del
-                        círculo. Hacé clic para colocar la anilla.
-                      </p>
-                    ) : null}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <ToggleButton
+                      active={ringDragActive}
+                      onClick={() => setRingDragActive((value) => !value)}
+                      icon={Move}
+                      className="w-full"
+                    >
+                      {ringDragActive ? "Moviendo" : "Mover anilla"}
+                    </ToggleButton>
                     <Button
                       size="sm"
-                      variant={settings.ringBoss ? "default" : "outline"}
-                      aria-pressed={settings.ringBoss}
-                      className="w-full"
-                      onClick={() =>
-                        updateSettings({ ringBoss: !settings.ringBoss })
+                      variant="outline"
+                      disabled={
+                        settings.ringPosX === null &&
+                        settings.ringPosY === null
                       }
+                      onClick={() => {
+                        setRingDragActive(false);
+                        updateSettings({ ringPosX: null, ringPosY: null });
+                      }}
                     >
-                      {settings.ringBoss ? "Aro activado" : "Agregar aro"}
+                      <RotateCcw className="size-4" />
+                      Centrar
                     </Button>
-                    {settings.ringBoss ? (
-                      <NumberSlider
-                        id="keychain-ring-boss-layers"
-                        label="Altura del aro"
-                        value={settings.ringBossLayers}
-                        min={1}
-                        max={8}
-                        step={1}
-                        unit="capas"
-                        decimals={0}
-                        onChange={(value) =>
-                          updateSettings({ ringBossLayers: value })
-                        }
-                      />
-                    ) : null}
-                  </>
-                ) : null}
-              </Panel>
+                  </div>
 
-              <Panel
-                id="border"
-                icon={Palette}
-                title="Color y borde"
-                summary={
-                  settings.borderEnabled
-                    ? `${settings.baseColor} · borde ${settings.borderWidthMm.toFixed(1)} mm`
-                    : settings.baseColor
-                }
-                open={openPanels.border}
-                onToggle={togglePanel}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <Label htmlFor="keychain-base-color" className="text-xs">
-                    Color de la base
-                  </Label>
-                  <input
-                    id="keychain-base-color"
-                    type="color"
-                    value={settings.baseColor}
-                    onChange={(event) =>
-                      updateSettings({ baseColor: event.target.value })
-                    }
-                    className="h-8 w-14 cursor-pointer rounded-md border bg-transparent"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <Button
-                    size="sm"
-                    variant={settings.borderEnabled ? "default" : "outline"}
-                    aria-pressed={settings.borderEnabled}
-                    className="w-full"
-                    onClick={() =>
-                      updateSettings({ borderEnabled: !settings.borderEnabled })
-                    }
-                  >
-                    {settings.borderEnabled
-                      ? "Borde activado"
-                      : "Agregar borde elevado"}
-                  </Button>
-                  {settings.borderEnabled ? (
-                    <NumberSlider
-                      id="keychain-border-width"
-                      label="Ancho del borde"
-                      value={settings.borderWidthMm}
-                      min={1}
-                      max={Math.max(2, settings.widthMm / 4)}
-                      step={0.5}
-                      unit="mm"
-                      onChange={(value) =>
-                        updateSettings({ borderWidthMm: value })
-                      }
-                    />
+                  {ringDragActive ? (
+                    <Hint>
+                      Mové el mouse sobre el modelo: verás la silueta del
+                      círculo. Hacé clic para colocar la anilla.
+                    </Hint>
                   ) : null}
-                  {settings.borderEnabled ? (
+
+                  <ToggleButton
+                    active={settings.ringBoss}
+                    onClick={() =>
+                      updateSettings({ ringBoss: !settings.ringBoss })
+                    }
+                    className="w-full"
+                  >
+                    {settings.ringBoss ? "Aro activado" : "Agregar aro"}
+                  </ToggleButton>
+
+                  {settings.ringBoss ? (
                     <NumberSlider
-                      id="keychain-border-layers"
-                      label="Altura del borde"
-                      value={settings.borderLayers}
+                      id="keychain-ring-boss-layers"
+                      label="Altura del aro"
+                      value={settings.ringBossLayers}
                       min={1}
-                      max={12}
+                      max={8}
                       step={1}
                       unit="capas"
                       decimals={0}
                       onChange={(value) =>
-                        updateSettings({ borderLayers: value })
+                        updateSettings({ ringBossLayers: value })
                       }
                     />
                   ) : null}
-                </div>
-              </Panel>
-            </TabsContent>
-          </Tabs>
+                </>
+              ) : null}
+            </PanelSection>
 
-          <Separator />
+            <PanelSection
+              icon={Palette}
+              title="Acabado"
+              summary={
+                settings.borderEnabled
+                  ? `${settings.baseColor} · borde ${settings.borderWidthMm.toFixed(1)} mm`
+                  : settings.baseColor
+              }
+            >
+              <Field label="Color de la base" htmlFor="keychain-base-color">
+                <input
+                  id="keychain-base-color"
+                  type="color"
+                  value={settings.baseColor}
+                  onChange={(event) =>
+                    updateSettings({ baseColor: event.target.value })
+                  }
+                  className="h-9 w-full cursor-pointer rounded-md border bg-transparent"
+                />
+              </Field>
 
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full text-muted-foreground"
-            title="Vuelve forma, tamaño y capas a los valores por defecto (no borra el diseño)"
-            onClick={handleReset}
-          >
-            Restablecer medidas
-          </Button>
-        </div>
+              <ToggleButton
+                active={settings.borderEnabled}
+                onClick={() =>
+                  updateSettings({ borderEnabled: !settings.borderEnabled })
+                }
+                icon={Square}
+                className="w-full"
+              >
+                {settings.borderEnabled
+                  ? "Borde activado"
+                  : "Agregar borde elevado"}
+              </ToggleButton>
+
+              {settings.borderEnabled ? (
+                <>
+                  <NumberSlider
+                    id="keychain-border-width"
+                    label="Ancho del borde"
+                    value={settings.borderWidthMm}
+                    min={1}
+                    max={Math.max(2, settings.widthMm / 4)}
+                    step={0.5}
+                    unit="mm"
+                    onChange={(value) =>
+                      updateSettings({ borderWidthMm: value })
+                    }
+                  />
+                  <NumberSlider
+                    id="keychain-border-layers"
+                    label="Altura del borde"
+                    value={settings.borderLayers}
+                    min={1}
+                    max={12}
+                    step={1}
+                    unit="capas"
+                    decimals={0}
+                    onChange={(value) =>
+                      updateSettings({ borderLayers: value })
+                    }
+                  />
+                </>
+              ) : null}
+            </PanelSection>
+
+            <PanelSection
+              icon={Download}
+              title="Exportar"
+              summary={
+                model
+                  ? `${model.colors.length + 1} filamento(s)`
+                  : "STL · 3MF"
+              }
+              defaultOpen={false}
+            >
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  size="sm"
+                  disabled={!model || (!!exporting && exporting !== "stl")}
+                  title="STL: geometría en un solo color (sin información de color)"
+                  onClick={() => void handleExport("stl")}
+                >
+                  {exporting === "stl" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Download className="size-4" />
+                  )}
+                  STL
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!model || (!!exporting && exporting !== "3mf")}
+                  title="3MF: conserva el color de cada filamento (para imprimir a color)"
+                  onClick={() => void handleExport("3mf")}
+                >
+                  {exporting === "3mf" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Download className="size-4" />
+                  )}
+                  3MF
+                </Button>
+              </div>
+              <Hint>
+                STL guarda solo la geometría. 3MF conserva el color de cada
+                pieza para imprimir a color.
+              </Hint>
+            </PanelSection>
+
+            <Separator />
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full text-muted-foreground"
+              title="Vuelve forma, tamaño y capas a los valores por defecto (no borra el diseño)"
+              onClick={handleReset}
+            >
+              Restablecer medidas
+            </Button>
+          </PanelTooltips>
+        </aside>
       </div>
     </div>
   );
@@ -1809,67 +1698,12 @@ function NumberSlider({
   );
 }
 
-function Panel({
-  id,
-  title,
-  icon: Icon,
-  summary,
-  open,
-  onToggle,
-  children,
-}: {
-  id: string;
-  title: string;
-  icon: LucideIcon;
-  summary?: string;
-  open: boolean;
-  onToggle: (id: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <div className="overflow-hidden rounded-xl border bg-card">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => onToggle(id)}
-        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-accent/40"
-      >
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-          <Icon className="size-3.5" />
-        </span>
-        <span className="flex-1 text-sm font-medium">{title}</span>
-        {summary ? (
-          <span className="shrink-0 text-[11px] font-normal tabular-nums text-muted-foreground">
-            {summary}
-          </span>
-        ) : null}
-        <ChevronDown
-          className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-      {open ? (
-        <div className="space-y-3 border-t border-border/60 px-3 py-3">
-          {children}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border bg-muted/30 px-3 py-2">
       <p className="text-[11px] text-muted-foreground">{label}</p>
       <p className="text-sm font-medium tabular-nums">{value}</p>
     </div>
-  );
-}
-
-function TabHint({ children }: { children: ReactNode }) {
-  return (
-    <p className="px-0.5 text-[11px] leading-relaxed text-muted-foreground">
-      {children}
-    </p>
   );
 }
 
