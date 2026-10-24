@@ -90,7 +90,7 @@ export const TOOLS: ToolDefinition[] = [
     tags: ["stl", "textura", "relieve", "displacement", "3d"],
     features: [
       "Importar STL binario o ASCII",
-      "12 texturas procedurales sin costuras",
+      "24 texturas procedurales sin costuras",
       "Mapa de desplazamiento propio",
       "Proyección triplanar y planos XY/XZ/YZ",
       "Máscara por ángulo y base de apoyo",

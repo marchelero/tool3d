@@ -1,10 +1,12 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type DragEvent,
 } from "react";
@@ -12,16 +14,26 @@ import {
   ArrowUpDown,
   BookOpen,
   Box,
+  Circle,
   Download,
+  Eye,
   FileUp,
+  FolderOpen,
   Grid3x3,
   Layers,
   Loader2,
   Lock,
+  Paintbrush,
+  Palette,
+  Redo2,
   RotateCcw,
+  Save,
   Shield,
   Sparkles,
+  Star,
+  Triangle,
   TriangleAlert,
+  Undo2,
   Unlock,
   Upload,
   Waves,
@@ -46,6 +58,11 @@ import {
 import { baseName } from "@/lib/image/download";
 import { loadStlFile, type LoadedStl } from "@/lib/texturizer/load-stl";
 import {
+  createPrimitive,
+  PRIMITIVE_LABELS,
+  type PrimitiveKind,
+} from "@/lib/texturizer/primitives";
+import {
   downloadStl,
   estimateStlBytes,
   stlFromMesh,
@@ -58,20 +75,27 @@ import {
 } from "@/lib/texturizer/textures";
 import {
   DEFAULT_TEXTURIZER_SETTINGS,
+  TEXTURE_IDS,
   type AmplitudeUnit,
   type MaskAction,
   type MaskFaces,
   type MaskSettings,
+  type MaskStroke,
   type ProcessOptions,
   type ProcessResult,
   type ProjectionMode,
+  type TextureId,
   type TextureSelection,
   type TextureTile,
   type TexturizerSettings,
 } from "@/lib/texturizer/types";
 import { TexturizerProcessor } from "@/lib/texturizer/worker-client";
+import { TEXTURE_BASE_MM } from "@/lib/texturizer/displace";
 import { TextureGallery } from "./texture-gallery";
-import { TexturizerViewer } from "./texturizer-viewer";
+import {
+  TexturizerViewer,
+  type HdPreviewSettings,
+} from "./texturizer-viewer";
 import {
   BufferAttribute,
   BufferGeometry,
@@ -83,7 +107,8 @@ const DESCRIPTION =
 const PREVIEW_TRIANGLE_BUDGET = 650_000;
 const EXPORT_TRIANGLE_BUDGET = 1_500_000;
 const PROCESS_DELAY = 280;
-const TILE_SIZE = 256;
+const TILE_SIZE = 512;
+const CUSTOM_TILE_SIZE = 1024;
 
 const PROJECTION_OPTIONS: {
   value: ProjectionMode;
@@ -98,6 +123,16 @@ const PROJECTION_OPTIONS: {
   { value: "xy", label: "XY", title: "Proyecta sobre el plano XY" },
   { value: "xz", label: "XZ", title: "Proyecta sobre el plano XZ" },
   { value: "yz", label: "YZ", title: "Proyecta sobre el plano YZ" },
+  {
+    value: "cylindrical",
+    label: "Cilíndrica",
+    title: "Envuelve la textura alrededor del eje Z",
+  },
+  {
+    value: "spherical",
+    label: "Esférica",
+    title: "Envuelve la textura alrededor del centro de la pieza",
+  },
 ];
 
 const MASK_ACTION_OPTIONS: { value: MaskAction; label: string }[] = [
@@ -111,10 +146,186 @@ const MASK_FACE_OPTIONS: { value: MaskFaces; label: string }[] = [
   { value: "both", label: "Ambas" },
 ];
 
+const MASK_PAINT_OPTIONS: {
+  value: MaskStroke["mode"];
+  label: string;
+}[] = [
+  { value: "protect", label: "Proteger" },
+  { value: "apply", label: "Texturizar" },
+];
+
 const RESOLUTION_PRESETS = [
-  { value: 2, label: "Rápida" },
-  { value: 1, label: "Media" },
-  { value: 0.6, label: "Fina" },
+  { value: 0.7, label: "Rápida" },
+  { value: 0.4, label: "Media" },
+  { value: 0.25, label: "Fina" },
+  { value: 0.15, label: "Ultra" },
+];
+
+const FAVORITES_STORAGE_KEY = "tool3d.texturizer.favorites";
+const FAVORITES_EVENT = "tool3d:texturizer-favorites";
+const EMPTY_FAVORITES: TextureId[] = [];
+const SETTINGS_FILE_VERSION = 1;
+
+let favoritesCache: TextureId[] | null = null;
+
+function readStoredFavorites(): TextureId[] {
+  if (typeof window === "undefined") return EMPTY_FAVORITES;
+  if (favoritesCache) return favoritesCache;
+  try {
+    const stored = window.localStorage.getItem(FAVORITES_STORAGE_KEY);
+    if (!stored) {
+      favoritesCache = EMPTY_FAVORITES;
+      return favoritesCache;
+    }
+    const parsed: unknown = JSON.parse(stored);
+    favoritesCache = Array.isArray(parsed)
+      ? parsed.filter(
+          (value): value is TextureId =>
+            typeof value === "string" &&
+            (TEXTURE_IDS as readonly string[]).includes(value)
+        )
+      : EMPTY_FAVORITES;
+  } catch {
+    favoritesCache = EMPTY_FAVORITES;
+  }
+  return favoritesCache;
+}
+
+function writeStoredFavorites(next: TextureId[]) {
+  favoritesCache = next;
+  try {
+    window.localStorage.setItem(
+      FAVORITES_STORAGE_KEY,
+      JSON.stringify(next)
+    );
+  } catch {
+    // Sin almacenamiento disponible: los favoritos duran la sesión.
+  }
+  window.dispatchEvent(new Event(FAVORITES_EVENT));
+}
+
+function subscribeFavorites(callback: () => void) {
+  const handleChange = (event: Event) => {
+    if (
+      event instanceof StorageEvent &&
+      event.key !== null &&
+      event.key !== FAVORITES_STORAGE_KEY
+    ) {
+      return;
+    }
+    favoritesCache = null;
+    callback();
+  };
+  window.addEventListener("storage", handleChange);
+  window.addEventListener(FAVORITES_EVENT, handleChange);
+  return () => {
+    window.removeEventListener("storage", handleChange);
+    window.removeEventListener(FAVORITES_EVENT, handleChange);
+  };
+}
+
+function getServerFavorites(): TextureId[] {
+  return EMPTY_FAVORITES;
+}
+
+interface MaterialPreset {
+  id: string;
+  label: string;
+  texture: TextureId;
+  scale: number;
+  amplitudeMm: number;
+  resolutionMm: number;
+  smoothing: number;
+}
+
+interface TexturizerHistory {
+  entries: TexturizerSettings[];
+  index: number;
+}
+
+const MATERIAL_PRESETS: MaterialPreset[] = [
+  {
+    id: "rubber",
+    label: "Goma",
+    texture: "honeycomb",
+    scale: 2.2,
+    amplitudeMm: 0.35,
+    resolutionMm: 0.25,
+    smoothing: 0.12,
+  },
+  {
+    id: "leather",
+    label: "Cuero",
+    texture: "voronoi",
+    scale: 1.6,
+    amplitudeMm: 0.28,
+    resolutionMm: 0.3,
+    smoothing: 0.18,
+  },
+  {
+    id: "wood",
+    label: "Madera",
+    texture: "wood",
+    scale: 1,
+    amplitudeMm: 0.35,
+    resolutionMm: 0.3,
+    smoothing: 0.08,
+  },
+  {
+    id: "metal",
+    label: "Metal",
+    texture: "knurl",
+    scale: 2.4,
+    amplitudeMm: 0.2,
+    resolutionMm: 0.2,
+    smoothing: 0.04,
+  },
+  {
+    id: "stone",
+    label: "Piedra",
+    texture: "noise",
+    scale: 1.2,
+    amplitudeMm: 0.5,
+    resolutionMm: 0.3,
+    smoothing: 0.22,
+  },
+  {
+    id: "fabric",
+    label: "Tela",
+    texture: "weave",
+    scale: 1.8,
+    amplitudeMm: 0.25,
+    resolutionMm: 0.25,
+    smoothing: 0.14,
+  },
+  {
+    id: "grip",
+    label: "Agarre",
+    texture: "crosshatch",
+    scale: 2,
+    amplitudeMm: 0.4,
+    resolutionMm: 0.25,
+    smoothing: 0.1,
+  },
+  {
+    id: "crystal",
+    label: "Cristal",
+    texture: "voronoi",
+    scale: 1.1,
+    amplitudeMm: 0.18,
+    resolutionMm: 0.2,
+    smoothing: 0.05,
+  },
+];
+
+const PRIMITIVE_OPTIONS: {
+  kind: PrimitiveKind;
+  label: string;
+  icon: typeof Box;
+}[] = [
+  { kind: "cube", label: "Cubo", icon: Box },
+  { kind: "sphere", label: "Esfera", icon: Circle },
+  { kind: "pyramid", label: "Pirámide", icon: Triangle },
 ];
 
 const numberFormat = new Intl.NumberFormat("es-AR");
@@ -266,19 +477,71 @@ export function TexturizerTool() {
   const [processError, setProcessError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const favorites = useSyncExternalStore(
+    subscribeFavorites,
+    readStoredFavorites,
+    getServerFavorites
+  );
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [compareOriginal, setCompareOriginal] = useState(false);
+  const [paintMode, setPaintMode] = useState(false);
+  const [paintAction, setPaintAction] =
+    useState<MaskStroke["mode"]>("protect");
+  const [paintRadius, setPaintRadius] = useState(3);
+  const [paintStrength, setPaintStrength] = useState(1);
+  const [history, setHistory] = useState<TexturizerHistory>({
+    entries: [DEFAULT_TEXTURIZER_SETTINGS],
+    index: 0,
+  });
 
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const customInputRef = useRef<HTMLInputElement | null>(null);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
   const modelRef = useRef<LoadedStl | null>(null);
   const processedGeometryRef = useRef<BufferGeometry | null>(null);
   const processorRef = useRef<TexturizerProcessor | null>(null);
   const exportProcessorRef = useRef<TexturizerProcessor | null>(null);
   const processTokenRef = useRef(0);
   const dragDepthRef = useRef(0);
+  const historyRef = useRef(history);
+  const historyTimerRef = useRef<number | null>(null);
+  const skipHistoryRef = useRef(false);
+  const handleExportRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     modelRef.current = model;
   }, [model]);
+
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
+  useEffect(() => {
+    if (skipHistoryRef.current) {
+      skipHistoryRef.current = false;
+      return;
+    }
+    if (historyTimerRef.current !== null) {
+      window.clearTimeout(historyTimerRef.current);
+    }
+    historyTimerRef.current = window.setTimeout(() => {
+      setHistory((previous) => {
+        const current = previous.entries[previous.index];
+        if (JSON.stringify(current) === JSON.stringify(settings)) {
+          return previous;
+        }
+        const entries = previous.entries.slice(0, previous.index + 1);
+        entries.push(settings);
+        if (entries.length > 60) entries.shift();
+        return { entries, index: entries.length - 1 };
+      });
+    }, 450);
+    return () => {
+      if (historyTimerRef.current !== null) {
+        window.clearTimeout(historyTimerRef.current);
+      }
+    };
+  }, [settings]);
 
   useEffect(() => {
     return () => {
@@ -286,6 +549,9 @@ export function TexturizerTool() {
       exportProcessorRef.current?.cancel();
       processedGeometryRef.current?.dispose();
       modelRef.current?.geometry.dispose();
+      if (historyTimerRef.current !== null) {
+        window.clearTimeout(historyTimerRef.current);
+      }
     };
   }, []);
 
@@ -297,6 +563,77 @@ export function TexturizerTool() {
     setSettings((previous) => ({
       ...previous,
       mask: { ...previous.mask, ...patch },
+    }));
+  };
+
+  const undo = useCallback(() => {
+    const current = historyRef.current;
+    if (current.index <= 0) return;
+    if (historyTimerRef.current !== null) {
+      window.clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+    }
+    skipHistoryRef.current = true;
+    const target = current.entries[current.index - 1];
+    setHistory({ ...current, index: current.index - 1 });
+    setSettings(target);
+  }, []);
+
+  const redo = useCallback(() => {
+    const current = historyRef.current;
+    if (current.index >= current.entries.length - 1) return;
+    if (historyTimerRef.current !== null) {
+      window.clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+    }
+    skipHistoryRef.current = true;
+    const target = current.entries[current.index + 1];
+    setHistory({ ...current, index: current.index + 1 });
+    setSettings(target);
+  }, []);
+
+  const toggleFavorite = (id: TextureId) => {
+    const next = favorites.includes(id)
+      ? favorites.filter((value) => value !== id)
+      : [...favorites, id];
+    writeStoredFavorites(next);
+  };
+
+  const handlePaintPoint = (x: number, y: number, z: number) => {
+    setSettings((previous) => {
+      if (previous.mask.strokes.length >= 400) return previous;
+      const stroke: MaskStroke = {
+        x,
+        y,
+        z,
+        radius: paintRadius,
+        strength: paintStrength,
+        mode: paintAction,
+      };
+      return {
+        ...previous,
+        mask: {
+          ...previous.mask,
+          strokes: [...previous.mask.strokes, stroke],
+        },
+      };
+    });
+  };
+
+  const applyMaterialPreset = (preset: MaterialPreset) => {
+    setSettings((previous) => ({
+      ...previous,
+      texture: preset.texture,
+      scaleU: preset.scale,
+      scaleV: preset.scale,
+      lockAspect: true,
+      amplitudeUnit: "mm",
+      amplitude: preset.amplitudeMm,
+      resolutionMm: preset.resolutionMm,
+      smoothing: preset.smoothing,
+      symmetric: true,
+      adaptive: false,
+      creaseNormals: false,
     }));
   };
 
@@ -316,6 +653,31 @@ export function TexturizerTool() {
   }, [customTile, settings.texture]);
 
   const hasTexture = Boolean(settings.texture && activeTile);
+  const hdSettings = useMemo<HdPreviewSettings | null>(() => {
+    if (!model) return null;
+    return {
+      projection: settings.projection,
+      origin: model.bounds.center,
+      scaleU: settings.scaleU,
+      scaleV: settings.scaleV,
+      offsetU: settings.offsetU,
+      offsetV: settings.offsetV,
+      rotationDeg: settings.rotationDeg,
+      amplitudeMm,
+      symmetric: settings.symmetric,
+      baseMm: TEXTURE_BASE_MM,
+    };
+  }, [
+    amplitudeMm,
+    model,
+    settings.offsetU,
+    settings.offsetV,
+    settings.projection,
+    settings.rotationDeg,
+    settings.scaleU,
+    settings.scaleV,
+    settings.symmetric,
+  ]);
   const outputTriangles = processed
     ? processed.triangles
     : model && (!hasTexture || amplitudeMm <= 0)
@@ -384,6 +746,7 @@ export function TexturizerTool() {
         amplitudeMm,
         symmetric: settings.symmetric,
         projection: settings.projection,
+        origin: model.bounds.center,
         scaleU: settings.scaleU,
         scaleV: settings.scaleV,
         offsetU: settings.offsetU,
@@ -392,6 +755,10 @@ export function TexturizerTool() {
         smoothing: settings.smoothing,
         repairMesh: settings.repairMesh,
         surfaceSmoothing: settings.surfaceSmoothing,
+        adaptive: settings.adaptive,
+        adaptiveThreshold: 0.06,
+        creaseNormals: settings.creaseNormals,
+        creaseAngleDeg: settings.creaseAngleDeg,
         mask: settings.mask,
         tile: activeTile,
       };
@@ -420,7 +787,7 @@ export function TexturizerTool() {
               : "No se pudo aplicar la textura"
           );
         });
-    }, PROCESS_DELAY);
+    }, paintMode ? 620 : PROCESS_DELAY);
 
     return () => {
       cancelled = true;
@@ -428,7 +795,26 @@ export function TexturizerTool() {
       processTokenRef.current += 1;
       processorRef.current?.cancel();
     };
-  }, [activeTile, amplitudeMm, model, settings]);
+  }, [activeTile, amplitudeMm, model, paintMode, settings]);
+
+  const installModel = (loaded: LoadedStl) => {
+    const previousModel = modelRef.current;
+    setModel(loaded);
+    modelRef.current = loaded;
+    setPaintMode(false);
+    setSettings((previous) => ({
+      ...previous,
+      mask: { ...previous.mask, strokes: [] },
+    }));
+    setProcessed(null);
+    const previousGeometry = processedGeometryRef.current;
+    processedGeometryRef.current = null;
+    setProcessedGeometry(null);
+    if (previousGeometry) disposeAfterFrames(previousGeometry);
+    if (previousModel && previousModel.geometry !== loaded.geometry) {
+      disposeAfterFrames(previousModel.geometry);
+    }
+  };
 
   const handleFile = async (file: File) => {
     const isStl =
@@ -442,17 +828,9 @@ export function TexturizerTool() {
     }
     setLoadingModel(true);
     setProcessError(null);
-    const previousModel = modelRef.current;
     try {
       const loaded = await loadStlFile(file);
-      setModel(loaded);
-      modelRef.current = loaded;
-      setProcessed(null);
-      const previousGeometry = processedGeometryRef.current;
-      processedGeometryRef.current = null;
-      setProcessedGeometry(null);
-      if (previousGeometry) disposeAfterFrames(previousGeometry);
-      if (previousModel) disposeAfterFrames(previousModel.geometry);
+      installModel(loaded);
       toast.success(
         `STL cargado · ${formatNumber(loaded.triangles)} triángulos`
       );
@@ -463,6 +841,17 @@ export function TexturizerTool() {
     } finally {
       setLoadingModel(false);
     }
+  };
+
+  const handlePrimitive = (kind: PrimitiveKind) => {
+    setProcessError(null);
+    const primitive = createPrimitive(kind);
+    installModel(primitive);
+    toast.success(
+      `Modelo de prueba: ${PRIMITIVE_LABELS[kind]} 30 mm · ${formatNumber(
+        primitive.triangles
+      )} triángulos`
+    );
   };
 
   const handleModelInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -481,7 +870,7 @@ export function TexturizerTool() {
     }
     setCustomLoading(true);
     try {
-      const tile = await customTextureFromFile(file, TILE_SIZE);
+      const tile = await customTextureFromFile(file, CUSTOM_TILE_SIZE);
       setCustomTile(tile);
       setCustomName(file.name);
       updateSettings({ texture: "custom" });
@@ -509,6 +898,12 @@ export function TexturizerTool() {
     setProcessedGeometry(null);
     setProcessing(null);
     setProcessError(null);
+    if (historyTimerRef.current !== null) {
+      window.clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+    }
+    skipHistoryRef.current = true;
+    setHistory({ entries: [DEFAULT_TEXTURIZER_SETTINGS], index: 0 });
     setSettings(DEFAULT_TEXTURIZER_SETTINGS);
     setCustomTile(null);
     setCustomName(null);
@@ -586,6 +981,85 @@ export function TexturizerTool() {
     });
   };
 
+  const saveSettingsFile = () => {
+    const payload = {
+      version: SETTINGS_FILE_VERSION,
+      tool: "texturizador",
+      savedAt: new Date().toISOString(),
+      settings,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${model ? baseName(model.fileName) : "texturizador"}-ajustes.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    toast.success("Ajustes guardados");
+  };
+
+  const handleProjectInput = async (
+    event: ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        !("settings" in parsed) ||
+        typeof parsed.settings !== "object" ||
+        parsed.settings === null
+      ) {
+        throw new Error("El archivo no contiene ajustes válidos");
+      }
+      const incoming = parsed.settings as Partial<TexturizerSettings>;
+      const texture =
+        incoming.texture === "custom"
+          ? null
+          : typeof incoming.texture === "string" &&
+              (TEXTURE_IDS as readonly string[]).includes(incoming.texture)
+            ? (incoming.texture as TextureId)
+            : incoming.texture === null
+              ? null
+              : DEFAULT_TEXTURIZER_SETTINGS.texture;
+      const mask =
+        typeof incoming.mask === "object" && incoming.mask !== null
+          ? {
+              ...DEFAULT_TEXTURIZER_SETTINGS.mask,
+              ...incoming.mask,
+              strokes: [],
+            }
+          : DEFAULT_TEXTURIZER_SETTINGS.mask;
+      const next: TexturizerSettings = {
+        ...DEFAULT_TEXTURIZER_SETTINGS,
+        ...incoming,
+        texture,
+        mask,
+        adaptive: Boolean(incoming.adaptive),
+        creaseNormals: Boolean(incoming.creaseNormals),
+        previewEnabled:
+          typeof incoming.previewEnabled === "boolean"
+            ? incoming.previewEnabled
+            : true,
+      };
+      setSettings(next);
+      toast.success("Ajustes cargados");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "No se pudo leer el archivo de ajustes"
+      );
+    }
+  };
+
   const handleExport = async () => {
     if (!model || exporting) return;
     setExporting(true);
@@ -607,6 +1081,7 @@ export function TexturizerTool() {
         amplitudeMm,
         symmetric: settings.symmetric,
         projection: settings.projection,
+        origin: model.bounds.center,
         scaleU: settings.scaleU,
         scaleV: settings.scaleV,
         offsetU: settings.offsetU,
@@ -615,6 +1090,10 @@ export function TexturizerTool() {
         smoothing: settings.smoothing,
         repairMesh: settings.repairMesh,
         surfaceSmoothing: settings.surfaceSmoothing,
+        adaptive: settings.adaptive,
+        adaptiveThreshold: 0.06,
+        creaseNormals: settings.creaseNormals,
+        creaseAngleDeg: settings.creaseAngleDeg,
         mask: settings.mask,
         tile: activeTile,
       };
@@ -647,6 +1126,45 @@ export function TexturizerTool() {
       setExportProgress(0);
     }
   };
+
+  useEffect(() => {
+    handleExportRef.current = () => {
+      void handleExport();
+    };
+  });
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          "input, textarea, select, [contenteditable='true'], [role='textbox']"
+        )
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (key === "o") {
+        event.preventDefault();
+        setSettings((previous) => ({
+          ...previous,
+          previewEnabled: !previous.previewEnabled,
+        }));
+      } else if (key === "e") {
+        event.preventDefault();
+        handleExportRef.current();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [redo, undo]);
 
   const onDragEnter = (event: DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
@@ -691,11 +1209,16 @@ export function TexturizerTool() {
         ? TEXTURE_LABELS[settings.texture]
         : "Sin textura";
 
-  const maskSummary = settings.mask.excludeBase
-    ? "Base excluida"
-    : settings.mask.enabled
-      ? "Activa"
-      : "Inactiva";
+  const maskSummary =
+    settings.mask.strokes.length > 0
+      ? `${formatNumber(settings.mask.strokes.length)} trazo${
+          settings.mask.strokes.length === 1 ? "" : "s"
+        }`
+      : settings.mask.excludeBase
+        ? "Base excluida"
+        : settings.mask.enabled
+          ? "Activa"
+          : "Inactiva";
 
   const resolutionSummary = processing
     ? `${Math.round(processing.progress * 100)}%`
@@ -725,6 +1248,13 @@ export function TexturizerTool() {
         className="sr-only"
         onChange={handleCustomInput}
       />
+      <input
+        ref={projectInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="sr-only"
+        onChange={handleProjectInput}
+      />
 
       <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
@@ -744,6 +1274,39 @@ export function TexturizerTool() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={undo}
+            disabled={history.index <= 0}
+            title="Deshacer (Ctrl+Z)"
+            aria-label="Deshacer"
+          >
+            <Undo2 className="size-4" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={redo}
+            disabled={history.index >= history.entries.length - 1}
+            title="Rehacer (Ctrl+Shift+Z)"
+            aria-label="Rehacer"
+          >
+            <Redo2 className="size-4" />
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onPointerDown={() => setCompareOriginal(true)}
+            onPointerUp={() => setCompareOriginal(false)}
+            onPointerLeave={() => setCompareOriginal(false)}
+            onPointerCancel={() => setCompareOriginal(false)}
+            title="Mantené presionado para ver el modelo original"
+            disabled={!processed}
+          >
+            <Eye className="size-4" />
+            A/B
+          </Button>
           <Button size="sm" variant="outline" onClick={handleNew}>
             <RotateCcw className="size-4" />
             Nuevo
@@ -757,7 +1320,12 @@ export function TexturizerTool() {
             <TexturizerViewer
               originalGeometry={model?.geometry ?? null}
               geometry={processedGeometry}
-              showOriginal={!settings.previewEnabled}
+              showOriginal={!settings.previewEnabled || compareOriginal}
+              heightTile={activeTile}
+              hdSettings={hdSettings}
+              paintMode={paintMode && hasTexture}
+              paintRadius={paintRadius}
+              onPaint={handlePaintPoint}
               onToggleShowOriginal={() =>
                 updateSettings({ previewEnabled: !settings.previewEnabled })
               }
@@ -1011,13 +1579,37 @@ export function TexturizerTool() {
                 <FileUp className="size-4" />
                 {model ? "Reemplazar STL" : "Cargar STL"}
               </Button>
+              <div className="space-y-1.5">
+                <GroupLabel>Modelos de prueba</GroupLabel>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {PRIMITIVE_OPTIONS.map((option) => {
+                    const Icon = option.icon;
+                    return (
+                      <Button
+                        key={option.kind}
+                        className="h-9 gap-1.5 px-2 text-xs"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handlePrimitive(option.kind)}
+                      >
+                        <Icon className="size-3.5" />
+                        {option.label}
+                      </Button>
+                    );
+                  })}
+                </div>
+                <Hint>
+                  Cubo, esfera y pirámide de 30 mm para comparar el relieve y
+                  revisar la malla.
+                </Hint>
+              </div>
               {model ? (
                 <div className="space-y-1 rounded-lg border bg-muted/20 px-2.5 py-2">
                   <p className="truncate text-xs font-medium">
                     {model.fileName}
                   </p>
                   <p className="text-[11px] text-muted-foreground">
-                    {formatBytes(model.fileSize)} ·{" "}
+                    {model.fileSize > 0 ? formatBytes(model.fileSize) : "Modelo base"} ·{" "}
                     {formatNumber(model.triangles)} triángulos
                   </p>
                   <p className="text-[11px] text-muted-foreground">
@@ -1039,6 +1631,43 @@ export function TexturizerTool() {
                 <RotateCcw className="size-4" />
                 Nuevo proyecto
               </Button>
+            </PanelSection>
+
+            <PanelSection
+              icon={Palette}
+              title="Materiales"
+              summary="Presets combinados"
+              defaultOpen={false}
+            >
+              <div className="grid grid-cols-4 gap-1.5">
+                {MATERIAL_PRESETS.map((preset) => {
+                  const active =
+                    settings.texture === preset.texture &&
+                    Math.abs(settings.amplitude - preset.amplitudeMm) < 0.001 &&
+                    Math.abs(settings.resolutionMm - preset.resolutionMm) <
+                      0.001;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      aria-pressed={active}
+                      title={`${preset.label}: ${TEXTURE_LABELS[preset.texture]}`}
+                      onClick={() => applyMaterialPreset(preset)}
+                      className={`h-8 rounded-md border text-[11px] transition-colors ${
+                        active
+                          ? "border-primary/60 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <Hint>
+                Ajusta textura, escala, amplitud, resolución y suavizado a la
+                vez. Después podés afinar cada valor.
+              </Hint>
             </PanelSection>
 
             <PanelSection
@@ -1074,6 +1703,53 @@ export function TexturizerTool() {
                 }
                 hint="0 conserva el detalle original. Más pasadas reducen ruido y también detalles finos."
               />
+              <ToggleButton
+                active={settings.adaptive}
+                onClick={() =>
+                  updateSettings({ adaptive: !settings.adaptive })
+                }
+                icon={Sparkles}
+                className="w-full"
+              >
+                Subdivisión adaptativa
+              </ToggleButton>
+              <Hint>
+                Refina solo las zonas con relieve fuerte. Da más detalle por
+                triángulo, pero tarda más. Para cuadrículas finas conviene
+                dejarla apagada.
+              </Hint>
+              <ToggleButton
+                active={settings.creaseNormals}
+                onClick={() =>
+                  updateSettings({ creaseNormals: !settings.creaseNormals })
+                }
+                icon={Triangle}
+                className="w-full"
+              >
+                Aristas duras
+              </ToggleButton>
+              {settings.creaseNormals ? (
+                <ValueSlider
+                  id="crease-angle"
+                  label="Ángulo de corte"
+                  value={settings.creaseAngleDeg}
+                  min={20}
+                  max={85}
+                  step={1}
+                  unit="°"
+                  decimals={0}
+                  onChange={(value) =>
+                    updateSettings({ creaseAngleDeg: value })
+                  }
+                  hint="Ángulo mínimo entre caras para separar normales. Valores bajos marcan más aristas y pueden facetar el relieve."
+                />
+              ) : (
+                <Hint>
+                  Separa las normales en cambios fuertes para conservar bordes
+                  vivos. Puede facetar las paredes de los surcos; revisá el
+                  resultado antes de exportar.
+                </Hint>
+              )}
             </PanelSection>
 
             <PanelSection
@@ -1081,13 +1757,27 @@ export function TexturizerTool() {
               title="Textura"
               summary={selectedTextureLabel}
             >
+              <div className="flex items-center justify-between gap-2">
+                <GroupLabel>Patrones</GroupLabel>
+                <ToggleButton
+                  active={favoritesOnly}
+                  onClick={() => setFavoritesOnly((value) => !value)}
+                  icon={Star}
+                  className="h-7 px-2 text-[11px]"
+                >
+                  Favoritos
+                </ToggleButton>
+              </div>
               <TextureGallery
                 selected={settings.texture}
                 customTile={customTile}
                 customName={customName}
+                favorites={favorites}
+                favoritesOnly={favoritesOnly}
                 onSelect={selectTexture}
                 onCustomClick={() => customInputRef.current?.click()}
                 onClearCustom={clearCustomTexture}
+                onToggleFavorite={toggleFavorite}
               />
               <Button
                 className="w-full"
@@ -1282,6 +1972,75 @@ export function TexturizerTool() {
               summary={maskSummary}
               defaultOpen={false}
             >
+              <div className="space-y-2 rounded-lg border bg-muted/20 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <GroupLabel>Pincel manual</GroupLabel>
+                  <span className="text-[11px] tabular-nums text-muted-foreground">
+                    {formatNumber(settings.mask.strokes.length)} / 400
+                  </span>
+                </div>
+                <Button
+                  className="w-full"
+                  size="sm"
+                  variant={paintMode ? "default" : "outline"}
+                  onClick={() => setPaintMode((value) => !value)}
+                  disabled={!hasTexture}
+                  aria-pressed={paintMode}
+                >
+                  <Paintbrush className="size-4" />
+                  {paintMode ? "Terminar pincel" : "Pintar máscara"}
+                </Button>
+                {paintMode ? (
+                  <>
+                    <SegmentedControl<MaskStroke["mode"]>
+                      label="Acción del pincel"
+                      value={paintAction}
+                      onValueChange={setPaintAction}
+                      options={MASK_PAINT_OPTIONS}
+                      columns={2}
+                    />
+                    <ValueSlider
+                      id="paint-radius"
+                      label="Radio del pincel"
+                      value={paintRadius}
+                      min={0.5}
+                      max={15}
+                      step={0.5}
+                      unit="mm"
+                      decimals={1}
+                      onChange={setPaintRadius}
+                    />
+                    <ValueSlider
+                      id="paint-strength"
+                      label="Intensidad"
+                      value={paintStrength}
+                      min={0.1}
+                      max={1}
+                      step={0.05}
+                      decimals={2}
+                      onChange={setPaintStrength}
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Arrastrá sobre el modelo en el visor. “Proteger” quita
+                      textura; “Texturizar” la fuerza incluso dentro de una zona
+                      excluida.
+                    </p>
+                  </>
+                ) : null}
+                <Button
+                  className="w-full"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setPaintMode(false);
+                    updateMask({ strokes: [] });
+                  }}
+                  disabled={settings.mask.strokes.length === 0}
+                >
+                  <X className="size-4" />
+                  Borrar trazos
+                </Button>
+              </div>
               <ToggleButton
                 active={settings.mask.enabled}
                 onClick={() => updateMask({ enabled: !settings.mask.enabled })}
@@ -1339,7 +2098,8 @@ export function TexturizerTool() {
               </ToggleButton>
               <Hint>
                 Incluir texturiza solo las caras seleccionadas. Excluir las
-                protege. La base excluida no recibe relieve.
+                protege. La base excluida no recibe relieve. Los trazos del
+                pincel se combinan con la máscara por ángulo.
               </Hint>
               <Button
                 className="w-full"
@@ -1363,15 +2123,15 @@ export function TexturizerTool() {
                 id="texture-resolution"
                 label="Arista objetivo"
                 value={settings.resolutionMm}
-                min={0.3}
+                min={0.12}
                 max={5}
-                step={0.1}
+                step={0.01}
                 unit="mm"
                 decimals={2}
                 onChange={(value) => updateSettings({ resolutionMm: value })}
                 hint="Más chico = más detalle y más triángulos."
               />
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
                 {RESOLUTION_PRESETS.map((preset) => {
                   const active =
                     Math.abs(settings.resolutionMm - preset.value) < 0.001;
@@ -1460,6 +2220,28 @@ export function TexturizerTool() {
                 />
                 <Stat label="Peso" value={formatBytes(estimatedBytes)} />
               </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={saveSettingsFile}
+                >
+                  <Save className="size-4" />
+                  Guardar ajustes
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => projectInputRef.current?.click()}
+                >
+                  <FolderOpen className="size-4" />
+                  Cargar ajustes
+                </Button>
+              </div>
+              <Hint>
+                Guarda textura, proyección, relieve, máscara y resolución en un
+                JSON. No incluye el STL ni los mapas personalizados.
+              </Hint>
             </PanelSection>
 
             <Button

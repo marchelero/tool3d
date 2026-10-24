@@ -1,0 +1,16 @@
+
+> tool3d@0.1.0 dev
+> next dev
+
+▲ Next.js 16.4.2 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.31.79:3000
+✓ Ready in 2.5s
+✓ Running next.config.ts took 90ms
+- Cache Components enabled
+- Partial Prefetching enabled
+
+✓ Generated AGENTS.md for AI agents. Set `agentRules: false` in next.config to disable.
+○ Compiling /tools/texturizador ...
+ GET /tools/texturizador 200 in 1004ms (next.js: 370ms, application-code: 634ms)
+ GET /tools/texturizador 200 in 180ms (next.js: 4ms, application-code: 176ms)

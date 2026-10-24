@@ -10,26 +10,37 @@ import {
   RefreshCw,
   Rotate3d,
   Scan,
+  Sparkles,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import {
   Box3,
   BufferGeometry,
+  DataTexture,
   DirectionalLight,
   DoubleSide,
   GridHelper,
   HemisphereLight,
+  LinearFilter,
   Mesh,
   MeshStandardMaterial,
+  NoColorSpace,
   PerspectiveCamera,
+  Raycaster,
+  RGBAFormat,
+  RepeatWrapping,
   Scene,
+  UnsignedByteType,
+  Vector2,
   Vector3,
   WebGLRenderer,
+  type Texture,
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { IconAction, PanelTooltips } from "@/components/tools/shared/panel";
 import { cn } from "@/lib/utils";
+import type { ProjectionMode, TextureTile } from "@/lib/texturizer/types";
 
 interface FitState {
   center: Vector3;
@@ -37,17 +48,167 @@ interface FitState {
   maxDimension: number;
 }
 
+export interface HdPreviewSettings {
+  projection: ProjectionMode;
+  origin: [number, number, number];
+  scaleU: number;
+  scaleV: number;
+  offsetU: number;
+  offsetV: number;
+  rotationDeg: number;
+  amplitudeMm: number;
+  symmetric: boolean;
+  baseMm: number;
+}
+
+const HD_VERTEX_HEADER = `
+varying vec3 vHdPosition;
+varying vec3 vHdNormal;
+`;
+
+const HD_FRAGMENT_HEADER = `
+uniform sampler2D uHeightMap;
+uniform float uHdEnabled;
+uniform float uRelief;
+uniform float uProjection;
+uniform vec3 uOrigin;
+uniform float uScaleU;
+uniform float uScaleV;
+uniform float uOffsetU;
+uniform float uOffsetV;
+uniform float uRotation;
+uniform float uBaseMm;
+varying vec3 vHdPosition;
+varying vec3 vHdNormal;
+
+float hdSampleHeight(vec2 uv) {
+  vec2 p = vec2(uv.x * uScaleU, uv.y * uScaleV) / uBaseMm;
+  float c = cos(uRotation);
+  float s = sin(uRotation);
+  vec2 q = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+  q += vec2(uOffsetU, uOffsetV);
+  return texture2D(uHeightMap, q).r;
+}
+
+vec2 hdPlanarUv(vec3 q) {
+  if (uProjection < 1.5) return q.xy;
+  if (uProjection < 2.5) return q.xz;
+  return q.yz;
+}
+
+float hdHeight(vec3 p, vec3 n) {
+  if (uProjection < 0.5) {
+    vec3 weights = pow(abs(n), vec3(4.0));
+    float total = weights.x + weights.y + weights.z;
+    if (total < 1e-6) return hdSampleHeight(p.xy);
+    weights /= total;
+    return hdSampleHeight(p.zy) * weights.x
+      + hdSampleHeight(p.xz) * weights.y
+      + hdSampleHeight(p.xy) * weights.z;
+  }
+  vec3 q = p - uOrigin;
+  if (uProjection > 3.5 && uProjection < 4.5) {
+    float radius = length(q.xy);
+    float angle = atan(q.y, q.x);
+    return hdSampleHeight(vec2(angle * max(radius, 1e-4), q.z));
+  }
+  if (uProjection > 4.5) {
+    float radius = length(q);
+    if (radius < 1e-6) return hdSampleHeight(vec2(0.0));
+    float angle = atan(q.y, q.x);
+    float polar = acos(clamp(q.z / radius, -1.0, 1.0));
+    return hdSampleHeight(vec2(angle * radius, polar * radius));
+  }
+  return hdSampleHeight(hdPlanarUv(q));
+}
+`;
+
+const HD_NORMAL_BLOCK = `
+#include <normal_fragment_maps>
+if (uHdEnabled > 0.5) {
+  vec3 hdP = vHdPosition;
+  vec3 hdN = normalize(vHdNormal);
+  float hdEps = 0.18;
+  float h0 = hdHeight(hdP, hdN);
+  float hx = hdHeight(hdP + vec3(hdEps, 0.0, 0.0), hdN);
+  float hy = hdHeight(hdP + vec3(0.0, hdEps, 0.0), hdN);
+  float hz = hdHeight(hdP + vec3(0.0, 0.0, hdEps), hdN);
+  vec3 hdGrad = vec3(hx - h0, hy - h0, hz - h0) / hdEps;
+  vec3 hdBumped = normalize(hdN - hdGrad * uRelief);
+  normal = normalize(mat3(viewMatrix) * hdBumped);
+}
+`;
+
+function projectionIndex(projection: ProjectionMode): number {
+  if (projection === "xy") return 1;
+  if (projection === "xz") return 2;
+  if (projection === "yz") return 3;
+  if (projection === "cylindrical") return 4;
+  if (projection === "spherical") return 5;
+  return 0;
+}
+
+function createHeightTexture(tile: TextureTile): DataTexture {
+  const { size, data } = tile;
+  const pixels = new Uint8Array(size * size * 4);
+  for (let index = 0; index < data.length; index += 1) {
+    const value = Math.max(0, Math.min(1, data[index]));
+    const byte = Math.round(value * 255);
+    const offset = index * 4;
+    pixels[offset] = byte;
+    pixels[offset + 1] = byte;
+    pixels[offset + 2] = byte;
+    pixels[offset + 3] = 255;
+  }
+  const texture = new DataTexture(
+    pixels,
+    size,
+    size,
+    RGBAFormat,
+    UnsignedByteType
+  );
+  texture.wrapS = RepeatWrapping;
+  texture.wrapT = RepeatWrapping;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.colorSpace = NoColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createFallbackTexture(): DataTexture {
+  const texture = new DataTexture(
+    new Uint8Array([0, 0, 0, 255]),
+    1,
+    1,
+    RGBAFormat,
+    UnsignedByteType
+  );
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export function TexturizerViewer({
   originalGeometry,
   geometry,
   showOriginal,
   onToggleShowOriginal,
+  heightTile,
+  hdSettings,
+  paintMode = false,
+  paintRadius = 3,
+  onPaint,
   className,
 }: {
   originalGeometry: BufferGeometry | null;
   geometry: BufferGeometry | null;
   showOriginal: boolean;
   onToggleShowOriginal: () => void;
+  heightTile: TextureTile | null;
+  hdSettings: HdPreviewSettings | null;
+  paintMode?: boolean;
+  paintRadius?: number;
+  onPaint?: (x: number, y: number, z: number) => void;
   className?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -60,11 +221,46 @@ export function TexturizerViewer({
   const gridRef = useRef<GridHelper | null>(null);
   const fitRef = useRef<FitState | null>(null);
   const lastOriginalRef = useRef<BufferGeometry | null>(null);
+  const hdTextureRef = useRef<DataTexture | null>(null);
+  const fallbackTextureRef = useRef<DataTexture | null>(null);
+  const hdUniformsRef = useRef({
+    uHeightMap: { value: null as Texture | null },
+    uHdEnabled: { value: 0 },
+    uRelief: { value: 0 },
+    uProjection: { value: 0 },
+    uOrigin: { value: new Vector3() },
+    uScaleU: { value: 1 },
+    uScaleV: { value: 1 },
+    uOffsetU: { value: 0 },
+    uOffsetV: { value: 0 },
+    uRotation: { value: 0 },
+    uBaseMm: { value: 10 },
+  });
+  const paintModeRef = useRef(false);
+  const paintRadiusRef = useRef(paintRadius);
+  const onPaintRef = useRef(onPaint);
+  const paintingRef = useRef(false);
+  const lastPaintRef = useRef<Vector3 | null>(null);
+
+  useEffect(() => {
+    paintModeRef.current = paintMode;
+    paintRadiusRef.current = paintRadius;
+    onPaintRef.current = onPaint;
+    const controls = controlsRef.current;
+    if (controls) controls.enabled = !paintMode;
+    const renderer = rendererRef.current;
+    if (renderer) {
+      renderer.domElement.style.cursor = paintMode ? "crosshair" : "";
+      renderer.domElement.style.touchAction = paintMode ? "none" : "";
+    }
+  }, [onPaint, paintMode, paintRadius]);
 
   const [showGrid, setShowGrid] = useState(true);
   const [wireframe, setWireframe] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
+  const [hdPreview, setHdPreview] = useState(false);
   const showGridRef = useRef(showGrid);
+  const hdAvailable = Boolean(heightTile && hdSettings);
 
   const applyView = useCallback((mode: "iso" | "top" | "front") => {
     const camera = cameraRef.current;
@@ -148,6 +344,9 @@ export function TexturizerViewer({
     rim.position.set(-40, 140, -90);
     scene.add(rim);
 
+    const fallback = createFallbackTexture();
+    fallbackTextureRef.current = fallback;
+    hdUniformsRef.current.uHeightMap.value = fallback;
     const material = new MeshStandardMaterial({
       color: 0xb8c1cc,
       roughness: 0.56,
@@ -156,6 +355,28 @@ export function TexturizerViewer({
       flatShading: false,
       wireframe: false,
     });
+    const hdUniforms = hdUniformsRef.current;
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, hdUniforms);
+      shader.vertexShader =
+        HD_VERTEX_HEADER +
+        shader.vertexShader
+          .replace(
+            "#include <beginnormal_vertex>",
+            "#include <beginnormal_vertex>\n  vHdNormal = normalize(mat3(modelMatrix) * objectNormal);"
+          )
+          .replace(
+            "#include <begin_vertex>",
+            "#include <begin_vertex>\n  vHdPosition = transformed;"
+          );
+      shader.fragmentShader =
+        HD_FRAGMENT_HEADER +
+        shader.fragmentShader.replace(
+          "#include <normal_fragment_maps>",
+          HD_NORMAL_BLOCK
+        );
+    };
+    material.customProgramCacheKey = () => "texturizer-hd-v1";
     const mesh = new Mesh(new BufferGeometry(), material);
     mesh.visible = false;
     scene.add(mesh);
@@ -179,6 +400,59 @@ export function TexturizerViewer({
     };
     renderer.setAnimationLoop(render);
 
+    const raycaster = new Raycaster();
+    const pointer = new Vector2();
+    const paintAt = (event: PointerEvent) => {
+      if (!paintModeRef.current || !onPaintRef.current) return;
+      const mesh = meshRef.current;
+      if (!mesh || !mesh.visible) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      pointer.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObject(mesh, false)[0];
+      if (!hit) return;
+      const local = mesh.worldToLocal(hit.point.clone());
+      const last = lastPaintRef.current;
+      if (
+        last &&
+        last.distanceTo(local) < Math.max(0.15, paintRadiusRef.current * 0.3)
+      ) {
+        return;
+      }
+      lastPaintRef.current = local.clone();
+      onPaintRef.current(local.x, local.y, local.z);
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!paintModeRef.current || event.button !== 0) return;
+      event.preventDefault();
+      paintingRef.current = true;
+      lastPaintRef.current = null;
+      renderer.domElement.setPointerCapture(event.pointerId);
+      paintAt(event);
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!paintingRef.current) return;
+      event.preventDefault();
+      paintAt(event);
+    };
+    const handlePointerUp = (event: PointerEvent) => {
+      if (!paintingRef.current) return;
+      paintingRef.current = false;
+      lastPaintRef.current = null;
+      if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+        renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+    };
+    renderer.domElement.addEventListener("pointerdown", handlePointerDown);
+    renderer.domElement.addEventListener("pointermove", handlePointerMove);
+    renderer.domElement.addEventListener("pointerup", handlePointerUp);
+    renderer.domElement.addEventListener("pointercancel", handlePointerUp);
+    renderer.domElement.addEventListener("pointerleave", handlePointerUp);
+
     const resize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
@@ -194,6 +468,23 @@ export function TexturizerViewer({
     return () => {
       observer.disconnect();
       renderer.setAnimationLoop(null);
+      renderer.domElement.removeEventListener(
+        "pointerdown",
+        handlePointerDown
+      );
+      renderer.domElement.removeEventListener(
+        "pointermove",
+        handlePointerMove
+      );
+      renderer.domElement.removeEventListener("pointerup", handlePointerUp);
+      renderer.domElement.removeEventListener(
+        "pointercancel",
+        handlePointerUp
+      );
+      renderer.domElement.removeEventListener(
+        "pointerleave",
+        handlePointerUp
+      );
       controls.dispose();
       material.dispose();
       grid.geometry.dispose();
@@ -216,6 +507,10 @@ export function TexturizerViewer({
       meshRef.current = null;
       materialRef.current = null;
       gridRef.current = null;
+      fallbackTextureRef.current?.dispose();
+      fallbackTextureRef.current = null;
+      hdTextureRef.current?.dispose();
+      hdTextureRef.current = null;
     };
   }, []);
 
@@ -228,6 +523,58 @@ export function TexturizerViewer({
     const controls = controlsRef.current;
     if (controls) controls.autoRotate = autoRotate;
   }, [autoRotate]);
+
+  useEffect(() => {
+    const uniforms = hdUniformsRef.current;
+    if (!heightTile) {
+      uniforms.uHeightMap.value =
+        fallbackTextureRef.current ?? uniforms.uHeightMap.value;
+      uniforms.uHdEnabled.value = 0;
+      return;
+    }
+    const current = hdTextureRef.current;
+    if (
+      !current ||
+      current.image.width !== heightTile.size ||
+      current.image.height !== heightTile.size ||
+      current.userData.tileData !== heightTile.data
+    ) {
+      current?.dispose();
+      const texture = createHeightTexture(heightTile);
+      texture.userData.tileData = heightTile.data;
+      hdTextureRef.current = texture;
+      uniforms.uHeightMap.value = texture;
+    } else {
+      uniforms.uHeightMap.value = current;
+    }
+  }, [heightTile]);
+
+  useEffect(() => {
+    const uniforms = hdUniformsRef.current;
+    if (!hdSettings) {
+      uniforms.uHdEnabled.value = 0;
+      return;
+    }
+    uniforms.uProjection.value = projectionIndex(hdSettings.projection);
+    uniforms.uOrigin.value.set(...hdSettings.origin);
+    uniforms.uScaleU.value = hdSettings.scaleU;
+    uniforms.uScaleV.value = hdSettings.scaleV;
+    uniforms.uOffsetU.value = hdSettings.offsetU;
+    uniforms.uOffsetV.value = hdSettings.offsetV;
+    uniforms.uRotation.value =
+      (hdSettings.rotationDeg * Math.PI) / 180;
+    uniforms.uBaseMm.value = hdSettings.baseMm;
+    uniforms.uRelief.value =
+      Math.max(0, hdSettings.amplitudeMm) *
+      (hdSettings.symmetric ? 2 : 1) *
+      0.35;
+  }, [hdSettings]);
+
+  useEffect(() => {
+    const uniforms = hdUniformsRef.current;
+    uniforms.uHdEnabled.value =
+      hdPreview && hdAvailable && !showOriginal && geometry ? 1 : 0;
+  }, [geometry, hdAvailable, hdPreview, showOriginal]);
 
   useEffect(() => {
     showGridRef.current = showGrid;
@@ -340,6 +687,18 @@ export function TexturizerViewer({
               icon={ZoomOut}
               onClick={() => zoomBy(1.22)}
             />
+            {hdAvailable ? (
+              <IconAction
+                label={
+                  hdPreview
+                    ? "Ocultar vista HD"
+                    : "Activar vista HD (solo visual)"
+                }
+                icon={Sparkles}
+                active={hdPreview}
+                onClick={() => setHdPreview((value) => !value)}
+              />
+            ) : null}
             <IconAction
               label={showGrid ? "Ocultar cuadrícula" : "Mostrar cuadrícula"}
               icon={Grid3x3}
@@ -359,6 +718,11 @@ export function TexturizerViewer({
               onClick={() => setAutoRotate((value) => !value)}
             />
           </div>
+        ) : null}
+        {paintMode ? (
+          <span className="pointer-events-none absolute bottom-2 left-2 rounded-md border border-primary/40 bg-background/90 px-2 py-1 text-[10px] font-medium text-primary shadow-sm backdrop-blur">
+            Pincel: arrastrá sobre el modelo · radio {paintRadius.toFixed(1)} mm
+          </span>
         ) : null}
         {showOriginal ? (
           <span className="pointer-events-none absolute bottom-2 left-2 rounded-md border bg-background/85 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground backdrop-blur">

@@ -28,7 +28,13 @@ export const TEXTURE_IDS = [
 export type TextureId = (typeof TEXTURE_IDS)[number];
 export type TextureSelection = TextureId | "custom";
 
-export type ProjectionMode = "triplanar" | "xy" | "xz" | "yz";
+export type ProjectionMode =
+  | "triplanar"
+  | "xy"
+  | "xz"
+  | "yz"
+  | "cylindrical"
+  | "spherical";
 export type MaskAction = "include" | "exclude";
 export type MaskFaces = "top" | "bottom" | "both";
 export type AmplitudeUnit = "mm" | "percent";
@@ -42,6 +48,15 @@ export interface MeshBounds {
   center: Vec3Tuple;
 }
 
+export interface MaskStroke {
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  strength: number;
+  mode: "protect" | "apply";
+}
+
 export interface MaskSettings {
   enabled: boolean;
   action: MaskAction;
@@ -49,6 +64,7 @@ export interface MaskSettings {
   maxAngleDeg: number;
   excludeBase: boolean;
   feather: number;
+  strokes: MaskStroke[];
 }
 
 export interface TexturizerSettings {
@@ -65,9 +81,12 @@ export interface TexturizerSettings {
   symmetric: boolean;
   smoothing: number;
   resolutionMm: number;
+  adaptive: boolean;
   previewEnabled: boolean;
   repairMesh: boolean;
   surfaceSmoothing: number;
+  creaseNormals: boolean;
+  creaseAngleDeg: number;
   mask: MaskSettings;
 }
 
@@ -80,14 +99,17 @@ export const DEFAULT_TEXTURIZER_SETTINGS: TexturizerSettings = {
   offsetU: 0,
   offsetV: 0,
   rotationDeg: 0,
-  amplitude: 0.6,
+  amplitude: 0.15,
   amplitudeUnit: "mm",
   symmetric: true,
   smoothing: 0,
-  resolutionMm: 0.6,
+  resolutionMm: 0.25,
+  adaptive: false,
   previewEnabled: true,
   repairMesh: true,
   surfaceSmoothing: 0,
+  creaseNormals: false,
+  creaseAngleDeg: 60,
   mask: {
     enabled: false,
     action: "exclude",
@@ -95,6 +117,7 @@ export const DEFAULT_TEXTURIZER_SETTINGS: TexturizerSettings = {
     maxAngleDeg: 45,
     excludeBase: false,
     feather: 1,
+    strokes: [],
   },
 };
 
@@ -120,6 +143,7 @@ export interface ProcessOptions {
   amplitudeMm: number;
   symmetric: boolean;
   projection: ProjectionMode;
+  origin: Vec3Tuple;
   scaleU: number;
   scaleV: number;
   offsetU: number;
@@ -128,6 +152,10 @@ export interface ProcessOptions {
   smoothing: number;
   repairMesh: boolean;
   surfaceSmoothing: number;
+  adaptive: boolean;
+  adaptiveThreshold: number;
+  creaseNormals: boolean;
+  creaseAngleDeg: number;
   mask: MaskSettings;
   tile: TextureTile;
 }
@@ -164,4 +192,6 @@ export const PROJECTION_LABELS: Record<ProjectionMode, string> = {
   xy: "Plano XY",
   xz: "Plano XZ",
   yz: "Plano YZ",
+  cylindrical: "Cilíndrica",
+  spherical: "Esférica",
 };

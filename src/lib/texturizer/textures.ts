@@ -90,9 +90,8 @@ function gridPattern(u: number, v: number): number {
   const fx = fract(u * cells);
   const fy = fract(v * cells);
   const edge = Math.min(fx, 1 - fx, fy, 1 - fy);
-  const ridge = 1 - smoothstep(0.055, 0.16, edge);
-  const plateau = smoothstep(0.18, 0.32, edge) * 0.15;
-  return clamp01(0.1 + ridge * 0.9 + plateau);
+  const groove = 1 - smoothstep(0.05, 0.12, edge);
+  return clamp01(0.1 + 0.9 * (1 - groove * 0.85));
 }
 
 function brickPattern(u: number, v: number): number {

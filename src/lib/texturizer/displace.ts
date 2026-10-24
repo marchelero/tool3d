@@ -4,6 +4,7 @@ import type {
   ProjectionMode,
 } from "./types";
 import {
+  buildCreasedMeshFast,
   computeBounds,
   computeMaskWeights,
   computeVertexNormals,
@@ -11,11 +12,12 @@ import {
   repairMesh,
   smoothVertices,
   subdivideMesh,
+  subdivideMeshAdaptive,
   weldTriangleSoup,
 } from "./subdivide";
 import { prepareTextureTile } from "./textures";
 
-const TEXTURE_BASE_MM = 10;
+export const TEXTURE_BASE_MM = 10;
 
 function sampleTile(
   data: Float32Array,
@@ -46,11 +48,24 @@ function projectionUv(
   mode: Exclude<ProjectionMode, "triplanar">,
   x: number,
   y: number,
-  z: number
+  z: number,
+  origin: readonly [number, number, number]
 ): [number, number] {
-  if (mode === "xy") return [x, y];
-  if (mode === "xz") return [x, z];
-  return [y, z];
+  const dx = x - origin[0];
+  const dy = y - origin[1];
+  const dz = z - origin[2];
+  if (mode === "xy") return [dx, dy];
+  if (mode === "xz") return [dx, dz];
+  if (mode === "yz") return [dy, dz];
+  const radius = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  if (mode === "cylindrical") {
+    return [angle * Math.max(radius, 1e-4), dz];
+  }
+  const sphericalRadius = Math.hypot(dx, dy, dz);
+  if (sphericalRadius <= 1e-6) return [0, 0];
+  const polar = Math.acos(Math.max(-1, Math.min(1, dz / sphericalRadius)));
+  return [angle * sphericalRadius, polar * sphericalRadius];
 }
 
 function sampleProjected(
@@ -108,7 +123,13 @@ function sampleHeight(
     );
 
   if (options.projection !== "triplanar") {
-    const [u, v] = projectionUv(options.projection, x, y, z);
+    const [u, v] = projectionUv(
+      options.projection,
+      x,
+      y,
+      z,
+      options.origin
+    );
     return sample(u, v);
   }
 
@@ -175,12 +196,41 @@ export function processMesh(
   const welded = weldTriangleSoup(positions);
   const repaired = options.repairMesh ? repairMesh(welded) : welded;
   const diagnostics = analyzeMesh(repaired);
-  const subdivided = subdivideMesh(
-    repaired,
-    options.targetEdgeMm,
-    options.maxTriangles,
-    onProgress
-  );
+  const baseMm = TEXTURE_BASE_MM;
+  const tileData = prepareTextureTile(options.tile, options.smoothing);
+  const evaluateHeight = (
+    x: number,
+    y: number,
+    z: number,
+    nx: number,
+    ny: number,
+    nz: number
+  ) =>
+    sampleHeight(
+      options,
+      tileData,
+      baseMm,
+      x,
+      y,
+      z,
+      nx,
+      ny,
+      nz
+    );
+  const subdivided = options.adaptive
+    ? subdivideMeshAdaptive(repaired, {
+        targetEdgeMm: options.targetEdgeMm,
+        maxTriangles: options.maxTriangles,
+        threshold: options.adaptiveThreshold,
+        evaluate: evaluateHeight,
+        onProgress,
+      })
+    : subdivideMesh(
+        repaired,
+        options.targetEdgeMm,
+        options.maxTriangles,
+        onProgress
+      );
   onProgress?.(0.8, "Calculando relieve");
   const faces = new Uint32Array(subdivided.faces);
   const baseVertices = new Float32Array(subdivided.vertices);
@@ -188,14 +238,12 @@ export function processMesh(
     options.surfaceSmoothing > 0
       ? smoothVertices(baseVertices, faces, options.surfaceSmoothing)
       : baseVertices;
-  const baseMm = TEXTURE_BASE_MM;
   const normals = computeVertexNormals(vertices, faces);
   const { weights, maskedTriangles } = computeMaskWeights(
     vertices,
     faces,
     options.mask
   );
-  const tileData = prepareTextureTile(options.tile, options.smoothing);
   const displaced = displaceVertices(
     vertices,
     normals,
@@ -204,17 +252,23 @@ export function processMesh(
     tileData,
     baseMm
   );
-  const finalNormals = computeVertexNormals(displaced, faces);
-  const bounds = computeBounds(displaced);
+  const creased = options.creaseNormals
+    ? buildCreasedMeshFast(displaced, faces, options.creaseAngleDeg)
+    : null;
+  const outputPositions = creased?.positions ?? displaced;
+  const outputIndices = creased?.indices ?? faces;
+  const finalNormals =
+    creased?.normals ?? computeVertexNormals(displaced, faces);
+  const bounds = computeBounds(outputPositions);
   const elapsedMs =
     (typeof performance !== "undefined" ? performance.now() : Date.now()) -
     startedAt;
   onProgress?.(1, "Listo");
   return {
-    positions: displaced,
-    indices: faces,
+    positions: outputPositions,
+    indices: outputIndices,
     normals: finalNormals,
-    triangles: faces.length / 3,
+    triangles: outputIndices.length / 3,
     sourceTriangles: positions.length / 9,
     maskedTriangles,
     openEdges: diagnostics.openEdges,

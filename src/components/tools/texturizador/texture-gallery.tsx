@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { Ban, ImagePlus, Upload } from "lucide-react";
+import { Ban, ImagePlus, Star, Upload } from "lucide-react";
 import {
   buildTextureTile,
   TEXTURE_LABELS,
@@ -46,31 +46,67 @@ function ProceduralThumb({ id }: { id: TextureId }) {
 function TextureTileButton({
   id,
   selected,
+  favorite,
   onSelect,
+  onToggleFavorite,
 }: {
   id: TextureId;
   selected: boolean;
+  favorite: boolean;
   onSelect: () => void;
+  onToggleFavorite: () => void;
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      aria-label={TEXTURE_LABELS[id]}
-      title={TEXTURE_LABELS[id]}
-      onClick={onSelect}
+    <div
       className={cn(
-        "group relative aspect-square overflow-hidden rounded-md border text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "group relative aspect-square overflow-hidden rounded-md border text-left transition-all",
         selected
           ? "border-primary ring-2 ring-primary/40"
           : "border-border hover:border-foreground/30"
       )}
     >
-      <ProceduralThumb id={id} />
-      <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/45 to-transparent px-1.5 pb-1 pt-4 text-[9px] font-medium leading-none text-white">
-        {TEXTURE_LABELS[id]}
-      </span>
-    </button>
+      <button
+        type="button"
+        aria-pressed={selected}
+        aria-label={TEXTURE_LABELS[id]}
+        title={TEXTURE_LABELS[id]}
+        onClick={onSelect}
+        className="absolute inset-0 block size-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <ProceduralThumb id={id} />
+        <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/45 to-transparent px-1.5 pb-1 pt-4 text-[9px] font-medium leading-none text-white">
+          {TEXTURE_LABELS[id]}
+        </span>
+      </button>
+      <button
+        type="button"
+        aria-label={
+          favorite
+            ? `Quitar ${TEXTURE_LABELS[id]} de favoritos`
+            : `Agregar ${TEXTURE_LABELS[id]} a favoritos`
+        }
+        aria-pressed={favorite}
+        title={favorite ? "Quitar de favoritos" : "Agregar a favoritos"}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleFavorite();
+        }}
+        className={cn(
+          "absolute right-1 top-1 z-10 grid size-6 place-items-center rounded-full bg-black/55 text-white shadow-sm backdrop-blur transition-opacity hover:bg-black/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          favorite
+            ? "opacity-100"
+            : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+        )}
+      >
+        <Star
+          className={cn(
+            "size-3.5",
+            favorite ? "fill-amber-300 text-amber-300" : "text-white"
+          )}
+          aria-hidden
+        />
+      </button>
+    </div>
   );
 }
 
@@ -78,18 +114,27 @@ export function TextureGallery({
   selected,
   customTile,
   customName,
+  favorites,
+  favoritesOnly,
   onSelect,
   onCustomClick,
   onClearCustom,
+  onToggleFavorite,
 }: {
   selected: TextureSelection | null;
   customTile: TextureTile | null;
   customName: string | null;
+  favorites: TextureId[];
+  favoritesOnly: boolean;
   onSelect: (id: TextureSelection | null) => void;
   onCustomClick: () => void;
   onClearCustom: () => void;
+  onToggleFavorite: (id: TextureId) => void;
 }) {
   const customSelected = selected === "custom";
+  const visibleIds = TEXTURE_IDS.filter(
+    (id) => !favoritesOnly || favorites.includes(id)
+  );
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-4 gap-2">
@@ -113,12 +158,14 @@ export function TextureGallery({
             Sin textura
           </span>
         </button>
-        {TEXTURE_IDS.map((id) => (
+        {visibleIds.map((id) => (
           <TextureTileButton
             key={id}
             id={id}
             selected={selected === id}
+            favorite={favorites.includes(id)}
             onSelect={() => onSelect(id)}
+            onToggleFavorite={() => onToggleFavorite(id)}
           />
         ))}
         {customTile ? (
@@ -153,6 +200,12 @@ export function TextureGallery({
           </button>
         )}
       </div>
+      {favoritesOnly && visibleIds.length === 0 ? (
+        <p className="rounded-md border border-dashed px-2.5 py-2 text-[11px] text-muted-foreground">
+          Todavía no marcaste texturas favoritas. Desactivá el filtro y tocá la
+          estrella de una textura.
+        </p>
+      ) : null}
       {customTile ? (
         <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
           <span className="flex min-w-0 items-center gap-1.5 truncate">

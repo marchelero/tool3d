@@ -1,26 +1,43 @@
-# Handoff — Texturizador STL (2026-10-22)
+# Handoff — Texturizador STL (2026-10-22, actualizado 2026-10-24)
 
 ## Estado
-- Branch: `main`; HEAD `68d5d42`.
-- Sin commit. Servidor de produccion activo en `http://localhost:3010`.
+- Branch: `main`; HEAD `8fb03d8`; sin commit nuevo.
+- Dev activo en `http://localhost:3000`.
 - El Texturizador STL esta implementado en `/tools/texturizador`.
-- Ultima validacion E2E: sin errores de pagina/consola; 12.288 triangulos de salida en 184 ms; mascara 0 caras.
-- El aviso visible "Amplitud alta" en el cubo de 10 mm es esperado: amplitud 0,6 mm simetrica = relieve total 1,20 mm, limite 1,00 mm (10% de 10 mm). No es un fallo de procesamiento.
+- Modelos de prueba de 30 mm: cubo (12 tri), esfera (3.968 tri) y piramide (6 tri); los tres cerrados.
+- Se corrigio el facetado que mostraba triangulos en las lineas: `adaptive` y `creaseNormals` quedan apagados por defecto.
+- `npx tsc --noEmit`, `npm run lint` y `npm run build` pasan; build con 8 rutas estaticas.
+
+## Defaults actuales
+- `texture: null`, `amplitude: 0.15`, `symmetric: true`, `resolutionMm: 0.25`.
+- `adaptive: false`, `creaseNormals: false`, `creaseAngleDeg: 60`.
+- `repairMesh: true`, `smoothing: 0`, `surfaceSmoothing: 0`.
+- `mask.enabled: false`, `mask.feather: 1`, `mask.strokes: []`.
+- Preview: `650.000` triangulos; export: `1.500.000`.
+- `TILE_SIZE = 512` para texturas procedurales; mapas propios a `1024`.
+- Presets de resolucion: Rapida `0.7`, Media `0.4`, Fina `0.25`, Ultra `0.15`.
 
 ## Implementado
 - Importacion STL binario/ASCII en cliente, preview Three.js y export STL binario.
-- Worker con cancelacion, subdivision adaptativa al presupuesto, 24 texturas procedurales y textura personalizada.
-- Proyeccion triplanar y planos XY/XZ/YZ; escala, offset, rotacion, amplitud en mm/% y simetria.
-- Mascara por angulo/base; `feather` con suavizado de pesos.
+- Worker con cancelacion y presupuesto de triangulos.
+- 24 texturas procedurales, galeria con favoritos persistentes y textura personalizada 1024.
+- Proyeccion triplanar, planos XY/XZ/YZ, cilindrica y esferica.
+- Escala, offset, rotacion, amplitud en mm/% y simetria.
+- Subdivision uniforme y adaptativa (opcional); suavizado Taubin; reparacion de malla.
+- Normales con aristas duras (opcional) y vista HD por normal map triplanar/planar/cilindrico/esferico (solo visual), **apagada por defecto** para no duplicar el relieve sobre la geometria.
+- Mascara por angulo/base, `feather` y pincel para proteger/texturizar zonas sobre el modelo.
+- 8 presets de material: Goma/Panal, Cuero/Voronoi, Madera, Metal, Piedra, Tela, Agarre y Cristal.
+- Undo/redo, atajos `Ctrl+Z`, `Ctrl+Shift+Z`, `O` (original) y `E` (exportar).
+- Comparador A/B manteniendo presionado el boton; guardar/cargar ajustes en JSON.
 - "Sin textura" (default) para cargar el STL sin procesar.
-- Seccion **Malla**: `repairMesh`, suavizado Taubin posterior a la subdivision.
-- Defaults actuales: `texture: null`, `amplitude: 0.6`, `smoothing: 0`, `resolutionMm: 0.6`, `repairMesh: true`, `surfaceSmoothing: 0`, `mask.feather: 1`.
+- Seccion **Modelo**: botones Cubo / Esfera / Piramide para probar sin cargar archivo.
+- `gridPattern`: celdas altas y lisas, lineas como surcos bajos.
 
 ## Archivos principales
 - `src/components/tools/texturizador/texturizer-tool.tsx`
 - `src/components/tools/texturizador/texturizer-viewer.tsx`
 - `src/components/tools/texturizador/texture-gallery.tsx`
-- `src/lib/texturizer/{types,textures,subdivide,displace,load-stl,export-stl,worker,worker-client}.ts`
+- `src/lib/texturizer/{types,textures,subdivide,displace,load-stl,export-stl,worker,worker-client,primitives}.ts`
 - `src/app/tools/texturizador/page.tsx`
 - `src/lib/tools/registry.ts`
 - `tsconfig.json` (`exclude: ["node_modules", "out"]`)
@@ -34,17 +51,23 @@ npm run lint
 npm run build
 ```
 
-Resultado: todos pasan. Pruebas temporales:
-- Cubo suavizado 0/1/2: 3.072 triangulos, `openEdges: 0`.
-- Mascara con feather 3: 1.024 de 3.072 triangulos enmascarados, malla cerrada.
-- Export round-trip: 614.484 bytes = 84 + 50 x 12.288.
+Resultado: todos pasan. E2E con Chrome headless/SwiftShader:
+- Cubo + Cuadricula, defaults con HD apagada: 393.216 tri, `Proceso: 2228 ms`, malla cerrada, sin errores; sin triangulos en las lineas.
+- Esfera + Cilindrica: 294.656 tri, `Proceso: 4483 ms`, malla cerrada.
+- Solo adaptativa: 342.222 tri, `Proceso: 5361 ms`.
+- Adaptativa + aristas duras: 342.222 tri, `Proceso: 17482 ms`.
+- Aristas duras con malla uniforme: 393.216 tri, `Proceso: 7435 ms`; sin triangulos, celdas aun algo redondeadas.
+- Mascara pintada: 17 trazos, 15.345 caras enmascaradas, `Proceso: 2657 ms`.
+- Capturas en `C:\Users\Marcelo\AppData\Local\Temp\texttest-06c5cdde32354556a9dfc7879bce5565\`: `final-default-hd-off.png`, `final-default-015.png`, `final-hd-035.png`, `final-hd-off-035.png`, `crease-uniform-hd-off.png`, `paint-01.png`, `ab-hold.png`, `sphere-cylindrical.png`, `saved-settings.json`.
 
-## Pendiente
-1. Revisar visualmente el default actual en una pieza tipo fidget (la captura del cubo ya muestra relieve claramente).
-2. Si el usuario quiere imitar BumpMesh: Chevron/Escamas, escala 2-3, amplitud 0,8-1,0 mm, suavizado 0, resolucion 0,5-0,6; exportar con presupuesto de 1,5 M.
-3. Aclarar que la base lisa de la mascara no es malla faltante; los huecos pueden ser auto-intersecciones por amplitud alta.
-4. No commitear sin autorizacion explicita.
+## Pendiente / notas
+1. Revisar el default con el STL real del usuario y confirmar visualmente que ya no quedan triangulos.
+2. La celda de Cuadricula aun se ve algo redondeada: la transicion del patron es ancha respecto a 0.25 mm; subir escala o bajar amplitud. La vista HD es solo visual y no cambia el STL.
+3. La proyeccion triplanar deforma la cuadricula en esferas y caras inclinadas; para organicas usar cilindrica/esferica o un plano.
+4. `adaptive` y `creaseNormals` son opcionales y lentos; `creaseNormals` puede facetar paredes si el angulo es bajo.
+5. El pincel usa la malla procesada para el raycast, pero la mascara se calcula sobre vertices sin desplazar (desfase ~amplitud).
+6. Guardar/cargar ajustes no incluye el STL ni el mapa personalizado.
+7. No commitear sin autorizacion explicita.
 
 ## Notas
 - `docs/SESSION.md` contiene bitacora antigua y puede estar desactualizado; este archivo es el handoff vigente.
-- Script E2E temporal: `C:\Users\Marcelo\AppData\Local\Temp\texttest-06c5cdde32354556a9dfc7879bce5565\finalcheck.js`.
