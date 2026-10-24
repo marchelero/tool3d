@@ -28,6 +28,7 @@
 - Mascara por angulo/base, `feather` y pincel para proteger/texturizar zonas sobre el modelo.
 - 8 presets de material: Goma/Panal, Cuero/Voronoi, Madera, Metal, Piedra, Tela, Agarre y Cristal.
 - Undo/redo, atajos `Ctrl+Z`, `Ctrl+Shift+Z`, `O` (original) y `E` (exportar).
+- Vista 3D maximizada a pantalla completa desde el visor; se restaura con `Esc`.
 - Comparador A/B manteniendo presionado el boton; guardar/cargar ajustes en JSON.
 - "Sin textura" (default) para cargar el STL sin procesar.
 - Seccion **Modelo**: botones Cubo / Esfera / Piramide para probar sin cargar archivo.

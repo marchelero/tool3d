@@ -484,6 +484,7 @@ export function TexturizerTool() {
   );
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [compareOriginal, setCompareOriginal] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [paintMode, setPaintMode] = useState(false);
   const [paintAction, setPaintAction] =
     useState<MaskStroke["mode"]>("protect");
@@ -507,6 +508,15 @@ export function TexturizerTool() {
   const historyTimerRef = useRef<number | null>(null);
   const skipHistoryRef = useRef(false);
   const handleExportRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    if (!expanded) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [expanded]);
 
   useEffect(() => {
     modelRef.current = model;
@@ -1228,7 +1238,11 @@ export function TexturizerTool() {
 
   return (
     <div
-      className="mx-auto w-full max-w-7xl px-4 py-8"
+      className={
+        expanded
+          ? "fixed inset-0 z-50 flex flex-col bg-background"
+          : "mx-auto w-full max-w-7xl px-4 py-8"
+      }
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -1256,23 +1270,33 @@ export function TexturizerTool() {
         onChange={handleProjectInput}
       />
 
-      <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <Badge>Texturizador</Badge>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight">
-            Texturizador STL
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            {DESCRIPTION}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {model
-              ? `${model.fileName} · ${formatNumber(
-                  model.triangles
-                )} triángulos · ${dimensions}`
-              : "Cargá un STL para empezar. Todo se procesa en tu navegador."}
-          </p>
-        </div>
+      <header
+        className={
+          expanded
+            ? "flex shrink-0 items-center justify-between gap-2 border-b bg-card/60 px-4 py-2"
+            : "mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"
+        }
+      >
+        {expanded ? (
+          <p className="text-sm font-medium">Texturizador · vista ampliada</p>
+        ) : (
+          <div>
+            <Badge>Texturizador</Badge>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight">
+              Texturizador STL
+            </h1>
+            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+              {DESCRIPTION}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {model
+                ? `${model.fileName} · ${formatNumber(
+                    model.triangles
+                  )} triángulos · ${dimensions}`
+                : "Cargá un STL para empezar. Todo se procesa en tu navegador."}
+            </p>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
@@ -1314,9 +1338,19 @@ export function TexturizerTool() {
         </div>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_390px]">
-        <div className="space-y-3">
-          <div className="relative">
+      <div
+        className={
+          expanded
+            ? "grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_380px]"
+            : "grid gap-6 lg:grid-cols-[minmax(0,1fr)_390px]"
+        }
+      >
+        <div
+          className={
+            expanded ? "flex min-h-0 flex-col" : "space-y-3"
+          }
+        >
+          <div className={expanded ? "relative min-h-0 flex-1" : "relative"}>
             <TexturizerViewer
               originalGeometry={model?.geometry ?? null}
               geometry={processedGeometry}
@@ -1329,7 +1363,11 @@ export function TexturizerTool() {
               onToggleShowOriginal={() =>
                 updateSettings({ previewEnabled: !settings.previewEnabled })
               }
-              className="h-[58vh] min-h-[440px] w-full"
+              expanded={expanded}
+              onToggleExpanded={() => setExpanded((value) => !value)}
+              className={
+                expanded ? "size-full" : "h-[58vh] min-h-[440px] w-full"
+              }
             />
 
             {!model ? (
@@ -1397,6 +1435,8 @@ export function TexturizerTool() {
             ) : null}
           </div>
 
+          {expanded ? null : (
+            <>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <Stat
               label="Entrada"
@@ -1506,9 +1546,17 @@ export function TexturizerTool() {
               </p>
             </div>
           ) : null}
+            </>
+          )}
         </div>
 
-        <aside className="space-y-3 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:self-start lg:overflow-y-auto lg:pr-1">
+        <aside
+          className={
+            expanded
+              ? "min-h-0 space-y-3 overflow-y-auto rounded-xl border bg-card p-4 shadow-xl"
+              : "space-y-3 lg:sticky lg:top-8 lg:max-h-[calc(100vh-4rem)] lg:self-start lg:overflow-y-auto lg:pr-1"
+          }
+        >
           <PanelTooltips>
             <PanelSection
               icon={BookOpen}

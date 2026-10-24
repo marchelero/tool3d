@@ -7,6 +7,8 @@ import {
   Eye,
   EyeOff,
   Grid3x3,
+  Maximize2,
+  Minimize2,
   RefreshCw,
   Rotate3d,
   Scan,
@@ -198,6 +200,8 @@ export function TexturizerViewer({
   paintMode = false,
   paintRadius = 3,
   onPaint,
+  expanded = false,
+  onToggleExpanded,
   className,
 }: {
   originalGeometry: BufferGeometry | null;
@@ -209,6 +213,8 @@ export function TexturizerViewer({
   paintMode?: boolean;
   paintRadius?: number;
   onPaint?: (x: number, y: number, z: number) => void;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   className?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -656,6 +662,13 @@ export function TexturizerViewer({
         />
         {originalGeometry ? (
           <div className="absolute top-2 right-2 flex flex-col gap-1">
+            {onToggleExpanded ? (
+              <IconAction
+                label={expanded ? "Restaurar (Esc)" : "Maximizar vista 3D"}
+                icon={expanded ? Minimize2 : Maximize2}
+                onClick={onToggleExpanded}
+              />
+            ) : null}
             <IconAction
               label={showOriginal ? "Ver textura" : "Ver original"}
               icon={showOriginal ? EyeOff : Eye}
