@@ -219,3 +219,146 @@ Siguiente: re-exportar STL/3MF desde la app y comprobarlos en el laminador (los
 archivos anteriores siguen roto). Pendiente valorar si el modo Huecos debe dividir la
 base en islas (55 piezas) o avisar al usuario.
 
+
+---
+
+## 9. Cortador (2026-10-24, sin commit)
+
+Estado: P0 y P1 completos; P2 parcial. Ruta /tools/cortador disponible en el
+registry. 
+px tsc --noEmit, 
+pm run lint, 
+pm test (26 tests) y
+
+pm run build pasan; tambien el build estatico con GITHUB_PAGES=1 + basePath.
+
+Implementado:
+
+- src/lib/mesh/*: nucleo compartido de weld, topologia, huecos y reparacion;
+  el Texturizador lo reutiliza via re-exports.
+- src/lib/cutter/*: loaders STL/3MF con unidades y color por triangulo, worker
+  manifold, cortes recto/curvo/forma/region, varita 3D, colocacion por sombra y
+  clic, encastres espiga/chaveta con cantidad y holgura, sugerencia automatica de
+  planos, undo/redo, proyecto en IndexedDB, export STL/3MF y reporte.
+- WASM en public/wasm/manifold.wasm; funciona con output: "export".
+- Verificado en navegador con CDP: cortes rectos/curvos/forma, varita, sombra,
+  encastre, undo/redo, guardar/abrir y sugerencia, sin excepciones.
+
+Pendiente: cola de milano, chaflan/cupon de tolerancia, preview decimado,
+separacion volumetrica por color, superficies libres y validacion dura de curvas.
+HEAD sin commit; scripts temporales de CDP eliminados.
+
+Siguiente: definir si se cierra P2/P3 o se commitea el MVP actual.
+
+### 9.1 Interaccion directa con el mouse (2026-10-24)
+
+Pedido del usuario: poder trabajar los cortes sobre el modelo 3D con el mouse,
+mover las piezas y que pintar la zona no sea click por click.
+
+Implementado en `cutter-viewer.tsx` y `cortador-tool.tsx`:
+
+- Arrastrar un plano azul en el visor mueve el corte en tiempo real; al soltar
+  queda fijado. La colocacion por sombra/clic sigue disponible.
+- Ondas y formas entran en modo colocacion al agregarlas; un clic sobre la pieza
+  fija la altura de la onda o el centro X/Y de la forma. Cada tarjeta tiene su
+  boton de puntero para volver a ubicarlas.
+- Modo «Mover» en la lista de piezas: arrastrar una pieza la desplaza en el
+  plano de camara; «Ubicar» restablece las posiciones.
+- Varita: pointerdown + arrastre pinta y acumula caras de la misma zona; Shift
+  agrega otra zona y Alt resta. `zoneFromFaces` reconstruye borde, area, normal
+  y eje desde el conjunto pintado.
+- El visor bloquea la orbita mientras pinta, mueve una pieza o arrastra un
+  plano, y restaura los controles al soltar.
+
+Verificado con CDP: plano colocado (-15.4 mm) y arrastrado (8.9 mm), forma
+estrella ubicada por clic, pieza movida, zona pintada de 46 caras y cortes
+posteriores con 2-4 piezas, sin excepciones. `tsc`, lint, 26 tests y build
+pasan.
+
+### 9.2 Gizmo Orca y separación automática de formas (2026-10-24)
+
+Pedido del usuario: manejar el corte como en OrcaSlicer (posicionar y girar con
+el mouse y aplicar con un botón) y separar formas unidas sin medir nada.
+
+Implementado:
+
+- Plano con gizmo: el cuerpo se arrastra para desplazarlo y el aro ámbar (o
+  Shift al arrastrar) lo inclina alrededor de su centro. Admite cualquier
+  orientación, no solo X/Y/Z. Un panel flotante muestra el plano activo, el
+  desplazamiento y la inclinación, con «Aplicar corte».
+- `planeRange` proyecta la caja sobre la normal para que los sliders funcionen
+  también con planos inclinados; al inclinar, el eje dominante se actualiza.
+- `seams.ts`: detecta uniones cóncavas (diedro ≥ 32° y concavidad negativa),
+  agrupa las aristas en bucles cerrados, ajusta un plano por Newell y valida
+  cada candidato partiendo la malla. Si no hay uniones, cae en `suggestCuts`.
+- Botón «Separar formas automáticamente» en Zonas: agrega los planos detectados
+  y corta al instante, con vista explotada.
+
+Calibración del signo de concavidad: en el cubo convexo el detector devuelve 0
+uniones; en la unión esfera r10 + cilindro r5×30 encuentra 1 unión y parte en
+2 piezas watertight (4.11 + 1.67 cm³) en 118 ms. Verificado en navegador con CDP
+sin excepciones. `tsc`, lint, 26 tests y build pasan. Sin commit.
+
+### 9.3 Layout, varita y objetos separables (2026-10-24)
+
+Tres problemas reportados con un 3MF de esqueleto (1.782.566 triángulos, 24 MB):
+
+- **Layout:** el Cortador no tenía contenedor propio. Ahora usa
+  `mx-auto max-w-7xl px-4 py-8`, el nombre del archivo se trunca y el panel
+  lateral es sticky con scroll independiente (`overflow-y-auto`,
+  `max-h-[calc(100vh-6rem)]`). Verificado a 1920×1080: sin overflow horizontal.
+- **Varita:** el 3MF no tenía materiales; el loader inventaba `#cbd5e1` y
+  mostraba «Color 3MF». Ahora los colores faltantes quedan en `null`, se avisa
+  que no hay materiales y no se ofrece separar por color. La varita usa
+  crecimiento por ángulo local entre caras vecinas (no contra la cara semilla),
+  así recorre superficies curvas. Para selecciones enormes (>50k caras) dibuja
+  solo el borde; si la selección es toda la cáscara no dibuja overlay.
+- **Rendimiento:** caché CSR de normales/adyacencia, caché de regiones por
+  color/tolerancia y caché del resultado dominante. En el esqueleto, clics
+  repetidos bajaron de ~7-10 s a ~2,6 s de pared medidos con CDP (incluye
+  overhead del harness); el primer clic incluye compilación/caché.
+- **Objetos:** botón «Separar objetos» que usa `Manifold.decompose()` y una
+  operación `components` del proyecto. En el esqueleto devuelve 1 cáscara real
+  (los 3 componentes del diagnóstico son cáscaras menores), así que avisa que es
+  una sola pieza. Para modelos con cáscaras independientes separa sin cortar.
+- **Límite honesto:** ese esqueleto es una sola superficie continua sin color;
+  no hay información geométrica para aislar «el zapato» semánticamente. Para eso
+  quedan el gizmo manual tipo Orca y la separación automática por uniones
+  cóncavas.
+
+Verificado: `tsc`, lint y build pasan; 29 tests (mesh 8, split 10, zones 6,
+seams 2, suggest 2, report 1). Sin commit.
+
+### 9.4 Vista previa antes de cortar (2026-10-24)
+
+Antes, elegir una zona o detectar uniones ejecutaba el corte de inmediato y
+podían aparecer piezas de volumen cero. Ahora el flujo es en dos pasos:
+
+- Seleccionar una zona, activar la varita, sugerir cortes, separar formas o
+  separar objetos **solo agrega operaciones pendientes**. Las piezas actuales no
+  cambian y la zona queda resaltada en el visor.
+- Aparece un panel flotante con «Aplicar cortes (N)»; recién ahí corre el worker
+  y se separan las piezas.
+- Los planos agregados quedan visibles y se pueden mover o inclinar antes de
+  aplicar. Después de aplicar, cada pieza usa un color distinto.
+- `runCuts` descarta fragmentos con volumen <= 1e-4 mm³; si no queda ninguna
+  pieza válida, muestra un error y conserva el estado anterior.
+- Los volúmenes pequeños se muestran con decimales (ya no aparecen como 0).
+
+Verificado en navegador con el modelo esfera+cilindro: antes de aplicar había 1
+pieza; al pulsar Aplicar quedaron 2 piezas (4.11 + 1.67 cm³), sin volúmenes en
+cero y sin excepciones. `tsc`, lint, 29 tests y build pasan. Sin commit.
+
+### 9.5 Previews de cortes curvos, por forma y por zona (2026-10-24)
+
+Antes solo se dibujaban los planos; las ondas, formas y zonas se cortaban sin
+referencia visual. Ahora el visor dibuja cada corte pendiente:
+
+- Ondas: línea violeta con la trayectoria sinusoidal real sobre la pieza.
+- Formas: contorno violeta del cortante en la cara superior.
+- Zonas: contorno de cada anillo a la profundidad del corte.
+- El corte activo se resalta en ámbar; los previews usan depthTest desactivado
+  y renderOrder 5 para verse sobre el modelo.
+
+El flujo de vista previa no cambió: los cortes quedan pendientes y recién se
+ejecutan con «Aplicar cortes». `tsc`, lint, 34 tests y build pasan. Sin commit.

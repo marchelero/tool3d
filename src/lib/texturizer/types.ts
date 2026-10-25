@@ -39,14 +39,11 @@ export type MaskAction = "include" | "exclude";
 export type MaskFaces = "top" | "bottom" | "both";
 export type AmplitudeUnit = "mm" | "percent";
 
-export type Vec3Tuple = [number, number, number];
+import type { MeshBounds, Vec3 } from "@/lib/mesh/types";
 
-export interface MeshBounds {
-  min: Vec3Tuple;
-  max: Vec3Tuple;
-  size: Vec3Tuple;
-  center: Vec3Tuple;
-}
+export type { MeshBounds } from "@/lib/mesh/types";
+
+export type Vec3Tuple = Vec3;
 
 export interface MaskStroke {
   x: number;

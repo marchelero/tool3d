@@ -22,6 +22,9 @@ mismos errores.
 | El primer uso de una herramienta tarda | librería pesada por dynamic import | esperado; mostrar progreso | varios |
 | SVG grande no llega a posavasos | límite de `sessionStorage` | avisar y permitir carga manual de SVG | `src/lib/3d/handoff.ts` |
 | Posavasos no toma el handoff | JSON inválido o `layers` vacío | `parsePosavasosHandoff` devuelve `null` | `src/lib/3d/handoff.ts` |
+| Turbopack no puede parsear `package.json` | BOM UTF-8 agregado al editar | reescribir sin BOM (`UTF8Encoding(false)`) | `package.json` |
+| `npm i` falla al instalar Vitest 5 | `@types/node` 20 vs peer `^22` | usar Vitest 3.2.x | `package.json` |
+| Worker/manifold 404 en el sitio estático | WASM no copiado o ruta sin `basePath` | `getManifoldWasmUrl()` + `public/wasm/manifold.wasm` | `src/lib/cutter/manifold.ts` |
 
 ---
 
@@ -294,14 +297,69 @@ que `.next/types` esté incluido en `tsconfig.json` (ya lo está).
 
 ---
 
+## 16. manifold-3d: CrossSection vacío o `InvalidConstruction`
+
+**Síntoma**: `CrossSection.ofPolygons([...]).extrude(...)` devuelve `numTri=0` y
+`status=InvalidConstruction`; los booleanos contra ese sólido dan volumen 0.
+
+**Causa**: el contorno estaba en sentido horario. Manifold espera contornos CCW
+(área positiva) y no explica cuál es el problema.
+
+**Solución**: calcular el área firmada del anillo y revertirlo si es negativa
+antes de `ofPolygons`. Verificado en `scripts/spike-manifold.mjs`: con CCW, un
+prisma de pared curva parte un cubo de 8000 mm³ en 3972.626 + 4027.374 mm³, con
+ambas piezas en `NoError`.
+
+**Regla**: todo contorno que entre a manifold (plano, curva o forma) pasa por
+normalización CCW y validación de auto-intersección.
+
+---
+
+## 17. `package.json` con BOM rompe Turbopack
+
+**Síntoma**: el build falla con un error de parseo de `package.json` en la
+primera línea, aunque el archivo se vea bien.
+
+**Causa**: alguna herramienta guardó el archivo con BOM UTF-8 (`EF BB BF`).
+
+**Solución**: reescribirlo con `UTF8Encoding(false)` o `Set-Content` sin BOM y
+mover `.next/cache` si Turbopack conserva el parseo viejo. Verificado en este
+repo al agregar los scripts de Vitest.
+
+---
+
+## 18. Vitest 5 no resuelve peers
+
+**Síntoma**: `npm install -D vitest` falla por `@types/node` 20 frente a peer
+`^22 || >=24`.
+
+**Solución**: usar `vitest@3.2.7` + `@vitest/coverage-v8@3.2.7`, que aceptan
+Node 20. Los tests son de entorno `node`; no requieren jsdom.
+
+---
+
+## 19. Proyecto guardado que no restaura
+
+**Síntoma**: el botón Abrir no aparece o falla al recrear la malla.
+
+**Causa**: IndexedDB bloqueado por modo privado/cuota, o el archivo fuente ya no
+coincide con las operaciones.
+
+**Comportamiento esperado**: `project.ts` guarda el archivo original y el JSON de
+operaciones, nunca la malla derivada. Si la carga falla, se informa y el estado
+anterior no se toca. Borrar el proyecto requiere limpiar `tool3d-cortador` en
+DevTools → Application → IndexedDB.
+
+---
+
 ## Checklist antes de tocar geometría o trazado
 
 - [ ] ¿La operación booleana está en `geom2-ops.ts` y validada?
 - [ ] ¿Los contornos están en CCW?
 - [ ] ¿Las piezas que se fusionan se solapan una capa?
-- [ ] ¿Evité booleanos 3D?
+- [ ] ¿El Cortador usa manifold en worker y valida watertight antes de exportar?
 - [ ] ¿El patrón deja gap entre celdas?
 - [ ] ¿El SVG se limpió (dedupe, colineales, Y invertida)?
 - [ ] Si toqué el 3MF, ¿lo abrí en un slicer y verifiqué colores?
 - [ ] ¿Respeté los límites de paths/polígonos/piezas?
-- [ ] ¿`npm run lint` y `npm run build` pasan?
+- [ ] ¿`npm run lint`, `npx tsc --noEmit`, `npm test` y `npm run build` pasan?

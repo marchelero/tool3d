@@ -1,4 +1,11 @@
 import type { MaskSettings, MeshBounds } from "./types";
+import { computeBounds as computeSharedBounds } from "@/lib/mesh/bounds";
+import { repairMesh as repairSharedMesh } from "@/lib/mesh/repair";
+import {
+  analyzeMesh as analyzeSharedMesh,
+} from "@/lib/mesh/topology";
+import type { MeshDiagnostics as SharedMeshDiagnostics } from "@/lib/mesh/types";
+import { weldTriangleSoup as weldSharedTriangleSoup } from "@/lib/mesh/weld";
 
 const MAX_SUBDIVISION_ITERATIONS = 14;
 
@@ -20,268 +27,23 @@ export interface SubdivisionResult {
 }
 
 export function computeBounds(positions: Float32Array): MeshBounds {
-  if (positions.length < 3) {
-    return {
-      min: [0, 0, 0],
-      max: [0, 0, 0],
-      size: [0, 0, 0],
-      center: [0, 0, 0],
-    };
-  }
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let minZ = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  let maxZ = Number.NEGATIVE_INFINITY;
-  for (let index = 0; index < positions.length; index += 3) {
-    const x = positions[index];
-    const y = positions[index + 1];
-    const z = positions[index + 2];
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (z < minZ) minZ = z;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-    if (z > maxZ) maxZ = z;
-  }
-  return {
-    min: [minX, minY, minZ],
-    max: [maxX, maxY, maxZ],
-    size: [maxX - minX, maxY - minY, maxZ - minZ],
-    center: [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2],
-  };
+  return computeSharedBounds(positions);
 }
 
 export function weldTriangleSoup(positions: Float32Array): WeldedMesh {
-  if (positions.length === 0 || positions.length % 9 !== 0) {
-    throw new Error("La malla no contiene triángulos válidos");
-  }
-  const bounds = computeBounds(positions);
-  const maxDimension = Math.max(bounds.size[0], bounds.size[1], bounds.size[2]);
-  if (!Number.isFinite(maxDimension) || maxDimension <= 0) {
-    throw new Error("La malla no tiene dimensiones válidas");
-  }
-  const tolerance = Math.max(1e-6, maxDimension * 1e-6);
-  const lookup = new Map<string, number>();
-  const vertices: number[] = [];
-  const faces: number[] = [];
-
-  const addVertex = (x: number, y: number, z: number): number => {
-    const key = `${Math.round(x / tolerance)},${Math.round(
-      y / tolerance
-    )},${Math.round(z / tolerance)}`;
-    const existing = lookup.get(key);
-    if (existing !== undefined) return existing;
-    const index = vertices.length / 3;
-    vertices.push(x, y, z);
-    lookup.set(key, index);
-    return index;
-  };
-
-  for (let index = 0; index < positions.length; index += 9) {
-    const ax = positions[index];
-    const ay = positions[index + 1];
-    const az = positions[index + 2];
-    const bx = positions[index + 3];
-    const by = positions[index + 4];
-    const bz = positions[index + 5];
-    const cx = positions[index + 6];
-    const cy = positions[index + 7];
-    const cz = positions[index + 8];
-    if (
-      !Number.isFinite(ax) ||
-      !Number.isFinite(ay) ||
-      !Number.isFinite(az) ||
-      !Number.isFinite(bx) ||
-      !Number.isFinite(by) ||
-      !Number.isFinite(bz) ||
-      !Number.isFinite(cx) ||
-      !Number.isFinite(cy) ||
-      !Number.isFinite(cz)
-    ) {
-      throw new Error("La malla contiene coordenadas inválidas");
-    }
-    const ux = bx - ax;
-    const uy = by - ay;
-    const uz = bz - az;
-    const vx = cx - ax;
-    const vy = cy - ay;
-    const vz = cz - az;
-    const nx = uy * vz - uz * vy;
-    const ny = uz * vx - ux * vz;
-    const nz = ux * vy - uy * vx;
-    const area = Math.hypot(nx, ny, nz);
-    if (area <= maxDimension * maxDimension * 1e-12) continue;
-    const a = addVertex(ax, ay, az);
-    const b = addVertex(bx, by, bz);
-    const c = addVertex(cx, cy, cz);
-    if (a === b || b === c || c === a) continue;
-    faces.push(a, b, c);
-  }
-
-  if (faces.length < 3) {
-    throw new Error("La malla no contiene triángulos válidos");
-  }
-
-  return {
-    vertices: new Float32Array(vertices),
-    faces: new Uint32Array(faces),
-  };
+  return weldSharedTriangleSoup(positions);
 }
 
 export function analyzeMesh(mesh: WeldedMesh): MeshDiagnostics {
-  const edgeCounts = new Map<string, number>();
-  const faces = mesh.faces;
-  for (let index = 0; index < faces.length; index += 3) {
-    const a = faces[index];
-    const b = faces[index + 1];
-    const c = faces[index + 2];
-    const edges: [number, number][] = [
-      [a, b],
-      [b, c],
-      [c, a],
-    ];
-    for (const [first, second] of edges) {
-      const key =
-        first < second ? `${first}:${second}` : `${second}:${first}`;
-      edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
-    }
-  }
-  let openEdges = 0;
-  let nonManifoldEdges = 0;
-  for (const count of edgeCounts.values()) {
-    if (count === 1) openEdges += 1;
-    else if (count > 2) nonManifoldEdges += 1;
-  }
-  return { openEdges, nonManifoldEdges };
-}
-
-function signedVolume(vertices: Float32Array, faces: Uint32Array): number {
-  let volume = 0;
-  for (let index = 0; index < faces.length; index += 3) {
-    const a = faces[index] * 3;
-    const b = faces[index + 1] * 3;
-    const c = faces[index + 2] * 3;
-    const ax = vertices[a];
-    const ay = vertices[a + 1];
-    const az = vertices[a + 2];
-    const bx = vertices[b];
-    const by = vertices[b + 1];
-    const bz = vertices[b + 2];
-    const cx = vertices[c];
-    const cy = vertices[c + 1];
-    const cz = vertices[c + 2];
-    volume +=
-      ax * (by * cz - bz * cy) +
-      ay * (bz * cx - bx * cz) +
-      az * (bx * cy - by * cx);
-  }
-  return volume / 6;
+  const diagnostics: SharedMeshDiagnostics = analyzeSharedMesh(mesh);
+  return {
+    openEdges: diagnostics.openEdges,
+    nonManifoldEdges: diagnostics.nonManifoldEdges,
+  };
 }
 
 export function repairMesh(mesh: WeldedMesh): WeldedMesh {
-  const seen = new Set<string>();
-  const deduped: number[] = [];
-  for (let index = 0; index < mesh.faces.length; index += 3) {
-    const a = mesh.faces[index];
-    const b = mesh.faces[index + 1];
-    const c = mesh.faces[index + 2];
-    const key = [a, b, c].sort((left, right) => left - right).join(":");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(a, b, c);
-  }
-
-  const faces = new Uint32Array(deduped);
-  const edgeFaces = new Map<
-    string,
-    { face: number; direction: 1 | -1 }[]
-  >();
-  const faceCount = faces.length / 3;
-  for (let face = 0; face < faceCount; face += 1) {
-    const offset = face * 3;
-    const a = faces[offset];
-    const b = faces[offset + 1];
-    const c = faces[offset + 2];
-    const pairs: [number, number][] = [
-      [a, b],
-      [b, c],
-      [c, a],
-    ];
-    for (const [first, second] of pairs) {
-      const key =
-        first < second ? `${first}:${second}` : `${second}:${first}`;
-      const entry = { face, direction: first < second ? 1 : -1 } as {
-        face: number;
-        direction: 1 | -1;
-      };
-      const list = edgeFaces.get(key);
-      if (list) list.push(entry);
-      else edgeFaces.set(key, [entry]);
-    }
-  }
-
-  const flipped = new Uint8Array(faceCount);
-  const visited = new Uint8Array(faceCount);
-  for (let start = 0; start < faceCount; start += 1) {
-    if (visited[start]) continue;
-    visited[start] = 1;
-    const queue = [start];
-    while (queue.length > 0) {
-      const face = queue.pop() as number;
-      const offset = face * 3;
-      const a = faces[offset];
-      const b = faces[offset + 1];
-      const c = faces[offset + 2];
-      const pairs: [number, number][] = [
-        [a, b],
-        [b, c],
-        [c, a],
-      ];
-      for (const [first, second] of pairs) {
-        const key =
-          first < second ? `${first}:${second}` : `${second}:${first}`;
-        const list = edgeFaces.get(key);
-        if (!list || list.length !== 2) continue;
-        const own = list.find((entry) => entry.face === face);
-        const other = list.find((entry) => entry.face !== face);
-        if (!own || !other || visited[other.face]) continue;
-        const ownDirection = own.direction * (flipped[face] ? -1 : 1);
-        const otherDirection =
-          other.direction * (flipped[other.face] ? -1 : 1);
-        if (ownDirection === otherDirection) {
-          flipped[other.face] = 1;
-        }
-        visited[other.face] = 1;
-        queue.push(other.face);
-      }
-    }
-  }
-
-  for (let face = 0; face < faceCount; face += 1) {
-    if (!flipped[face]) continue;
-    const offset = face * 3;
-    const b = faces[offset + 1];
-    faces[offset + 1] = faces[offset + 2];
-    faces[offset + 2] = b;
-  }
-
-  const diagnostics = analyzeMesh({ vertices: mesh.vertices, faces });
-  if (
-    diagnostics.openEdges === 0 &&
-    diagnostics.nonManifoldEdges === 0 &&
-    signedVolume(mesh.vertices, faces) < 0
-  ) {
-    for (let face = 0; face < faceCount; face += 1) {
-      const offset = face * 3;
-      const b = faces[offset + 1];
-      faces[offset + 1] = faces[offset + 2];
-      faces[offset + 2] = b;
-    }
-  }
-
-  return { vertices: mesh.vertices, faces };
+  return repairSharedMesh(mesh).mesh;
 }
 
 function laplacianStep(

@@ -6,6 +6,7 @@ import {
   Image as ImageIcon,
   KeyRound,
   Ruler,
+  Scissors,
   Shapes,
   Type,
 } from "lucide-react";
@@ -95,6 +96,24 @@ export const TOOLS: ToolDefinition[] = [
       "Proyección triplanar y planos XY/XZ/YZ",
       "Máscara por ángulo y base de apoyo",
       "Exportar STL binario",
+    ],
+  },
+  {
+    slug: "cortador",
+    name: "Cortador",
+    description:
+      "Cargá un STL o 3MF y partilo en piezas imprimibles con cortes rectos, curvos o por forma, encastres y reparación de malla.",
+    category: "3d",
+    status: "available",
+    icon: Scissors,
+    tags: ["stl", "3mf", "corte", "piezas", "encastre", "reparar"],
+    features: [
+      "Importar STL y 3MF",
+      "Reparar agujeros y mallas abiertas",
+      "Cortes rectos, curvos y por forma",
+      "Varita 3D para detectar zonas",
+      "Encastres con espiga y holgura",
+      "Exportar STL por pieza y 3MF",
     ],
   },
   {

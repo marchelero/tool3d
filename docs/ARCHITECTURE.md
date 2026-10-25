@@ -235,6 +235,27 @@ Trazado: `useEffect` con debounce de 400 ms sobre
 - Vistas: iso, superior, frontal; zoom por botones; auto-rotación.
 - Limpieza explícita de geometrías/materiales en unmount.
 
+#### Cortador (`cortador-tool.tsx` + `cutter-viewer.tsx`)
+
+- Pipeline: importar → reparar → zonas → cortes → encastres → exportar.
+- `src/lib/mesh/*` es el núcleo compartido de malla: `weldTriangleSoup`,
+  `analyzeMesh`, `repairMesh`, `fillHoles`, `connectedComponents`. El
+  Texturizador re-exporta estas funciones desde `texturizer/subdivide.ts`.
+- `src/lib/cutter/manifold.ts` carga `manifold-3d` desde
+  `public/wasm/manifold.wasm` con `locateFile`, cachea el módulo y funciona con
+  `basePath` y `output: "export"`.
+- `cutter/worker.ts` corre todos los booleanos. `split.ts` compila cada operación
+  a un sólido cerrado: plano (`splitByPlane`), prisma de onda, prisma de forma o
+  región; aplica encastres (espiga/chaveta) y devuelve piezas watertight.
+- `zones.ts` implementa la varita 3D (flood fill por normal, ángulo y color 3MF,
+  contiguo/global) y convierte el borde en una región de corte.
+- `suggest.ts` barre 15 secciones por eje con intersecciones manifold y propone
+  planos en los estrechamientos.
+- `project.ts` guarda en IndexedDB el archivo fuente y el JSON de operaciones
+  (no guarda la malla derivada). `report.ts` genera el informe de ensamblaje.
+- Export: STL binario por pieza/ZIP, 3MF con color y layout, gate que bloquea la
+  descarga si alguna pieza no es watertight.
+
 ---
 
 ## 4. Flujo de datos entre herramientas (handoff)

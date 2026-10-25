@@ -3,8 +3,9 @@
 ## Resumen
 
 Toolkit web modular de utilidades para **impresión 3D**. Arranca con herramientas
-de imagen, suma generación paramétrica de **posavasos 3D**, **llaveros** y
-**texturizado de STL por desplazamiento**, y está diseñado para crecer agregando
+de imagen, suma generación paramétrica de **posavasos 3D**, **llaveros**,
+**texturizado de STL por desplazamiento** y un **cortador de piezas con
+reparación, encastres y exportación**, y está diseñado para crecer agregando
 nuevas herramientas sin tocar el núcleo.
 
 ## Objetivo
@@ -22,8 +23,11 @@ sin costo de servidor.
   `@imgly/background-removal`
 - Geometría 3D: **`@jscad/modeling`** + serializers STL/3MF
 - Visor 3D: **Three.js** (`OrbitControls`, `STLLoader`)
+- Cortador: **`manifold-3d`** (WASM) en Web Worker para booleanos watertight,
+  reparación de malla, varita 3D, encastres y export STL/3MF
 - Texturizado STL: subdivisión y desplazamiento en **Web Worker**, texturas
   procedurales locales
+- Tests de geometría: **Vitest** sobre `src/lib/mesh` y `src/lib/cutter`
 - **npm** como package manager
 - Deploy objetivo: **Vercel** (sitio estático; sin API por ahora)
 - Sin secretos, sin `.env`, sin backend
@@ -35,13 +39,14 @@ sin costo de servidor.
 2. **Registro central**: `src/lib/tools/registry.ts` es la fuente de verdad del
    catálogo de la home. Agregar una tool = agregar una entrada.
 3. **Lógica pura separada de UI**: el procesamiento vive en `src/lib/image/*`,
-   `src/lib/3d/*` y `src/lib/texturizer/*` como funciones sin dependencias de
-   React.
+   `src/lib/3d/*`, `src/lib/mesh/*`, `src/lib/texturizer/*` y
+   `src/lib/cutter/*` como funciones sin dependencias de React.
 4. **Client-only cuando aplica**: las libs pesadas (IA de fondo, tracer,
    serializers, ZIP) se cargan con `dynamic import`.
 5. **Sin secretos en el cliente**: no hay claves API; todo el cómputo es local.
-6. **Geometría robusta**: operaciones 2D validadas + extrusión pura; evitar
-   booleanos 3D que generan mallas no estancas.
+6. **Geometría robusta**: operaciones 2D validadas + extrusión pura en las tools
+   paramétricas. El Cortador usa `manifold-3d` y verifica que toda pieza
+   exportada sea watertight; nunca exporta una malla abierta.
 
 ## Estructura
 
@@ -59,6 +64,8 @@ src/
     tools/registry.ts       # catálogo central
     image/                  # procesamiento de imagen (puro)
     3d/                     # SVG → geometría, patrones, posavasos, malla, handoff
+    mesh/                   # núcleo compartido: weld, topología, huecos, reparación
+    cutter/                 # Cortador: import, zonas, cortes, encastres, export
     texturizer/             # STL, subdivisión, texturas, desplazamiento, worker
   types/                    # .d.ts de librerías sin tipos
 docs/                       # PRD, arquitectura, decisiones, troubleshooting, sesión
@@ -72,6 +79,7 @@ docs/                       # PRD, arquitectura, decisiones, troubleshooting, se
 | `llavero` | Llavero | 3d | ✅ disponible |
 | `posavasos` | Posavasos | 3d | ✅ disponible |
 | `texturizador` | Texturizador STL | 3d | ✅ disponible |
+| `cortador` | Cortador | 3d | ✅ disponible |
 | `keychain` | Llaveros con nombres | 3d | ⏳ próximamente |
 | `generate-3d` | Generar 3D | 3d | ⏳ próximamente |
 | `calibration` | Calibración | utilidades | ⏳ próximamente |
@@ -85,14 +93,15 @@ docs/                       # PRD, arquitectura, decisiones, troubleshooting, se
 | 2 | Generador de **llaveros con nombres** (letras → SVG/STL) | ⏳ (ruta `llavero` placeholder) |
 | 3 | Generación/edición 3D + export STL/3MF (**posavasos paramétrico**, **llavero**) | ✅ |
 | 4 | **Texturizador STL** (desplazamiento por textura y máscara por ángulo) | ✅ MVP |
-| 5 | Más utilidades (calibración, presets de impresión, calculadoras, cajas) | ⏳ |
+| 5 | **Cortador** (reparación, cortes rectos/curvos/forma, varita 3D, encastres, export) | ✅ MVP |
+| 6 | Más utilidades (calibración, presets de impresión, calculadoras, cajas) | ⏳ |
 
 ## Estado actual
 
-- Home + herramientas de imagen, posavasos, llavero y texturizador STL
+- Home + herramientas de imagen, posavasos, llavero, texturizador STL y Cortador
   funcionales.
-- `npm run lint` y `npm run build` pasan.
-- Sin tests automatizados (verificación manual/E2E temporal).
+- `npm run lint`, `npx tsc --noEmit` y `npm run build` pasan.
+- 23 tests de geometría con Vitest (`src/lib/mesh` y `src/lib/cutter`).
 - Detalle de continuidad en `docs/SESSION.md`.
 
 ## Documentación

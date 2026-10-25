@@ -262,3 +262,38 @@ para poder usar resolución completa a pedido.
 - Deuda técnica explícita.
 - Las funciones de `src/lib/*` son puras y fáciles de testear cuando se decida.
 - Mayor riesgo de regresiones en geometría y trazado.
+
+## ADR-015 - manifold-3d para el Cortador
+
+**Contexto**: el Cortador necesita partir mallas arbitrarias y garantizar piezas
+watertight; los booleanos de JSCAD generan T-junctions (ADR-009).
+
+**Decisión**: manifold-3d@3.5.4 (WASM, Apache-2.0) corre en un Web Worker
+dedicado. Todo corte se compila a un solido cerrado antes del booleano y la
+exportacion se bloquea si alguna pieza no es watertight. El WASM se sirve desde
+public/wasm/manifold.wasm para funcionar con output: "export" y asePath.
+
+**Alternativas**: 	hree-bvh-csg (menos garantias), JSCAD (descartado por
+ADR-009), servicio backend (rompe client-side).
+
+**Consecuencias**:
+- Booleans confiables y rapidos en el navegador (split de 1M tri sin verificar).
+- +541 KB de WASM y un worker mas.
+- La reparacion previa sigue siendo necesaria: manifold rechaza mallas abiertas.
+
+## ADR-016 - Vitest acotado a src/lib/mesh y src/lib/cutter
+
+**Contexto**: ADR-014 dejo el repo sin tests, pero la geometria del Cortador
+tiene regresiones invisibles (volumen, orientacion, watertight).
+
+**Decision**: se agrega Vitest 3.2.7 en entorno Node y se testean solo modulos
+puros de malla/cortador. No se agrega Testing Library, jsdom ni E2E permanente.
+
+**Alternativas**: tests de UI con jsdom (costo alto, poco valor para geometria),
+Playwright permanente (se uso CDP manual durante el desarrollo).
+
+**Consecuencias**:
+- 23 tests rapidos (
+pm test) que cubren weld, reparacion, cortes, varita,
+  encastres, sugerencias e informe.
+- ADR-014 queda superado solo para estos modulos.
