@@ -3,8 +3,14 @@ import Module from "manifold-3d";
 import type { Manifold, ManifoldToplevel } from "manifold-3d";
 import type { MeshData } from "@/lib/mesh/types";
 import { computeBounds } from "@/lib/mesh/bounds";
+import { analyzeMesh } from "@/lib/mesh/topology";
 import { splitMesh } from "./split";
-import { selectZone, zoneFromFaces, zoneToRegionOp } from "./zones";
+import {
+  selectZone,
+  zoneFromFaces,
+  zoneToRegionOp,
+  zoneToSurfaceOp,
+} from "./zones";
 
 let wasm: ManifoldToplevel;
 
@@ -121,6 +127,78 @@ describe("selectZone", () => {
     expect(total).toBeCloseTo(8000, 3);
     for (const part of parts) {
       expect(part.volume).toBeGreaterThan(0);
+    }
+  });
+
+  it("captures the selected triangles as a compact, serializable surface patch", () => {
+    const mesh = cubeMesh(20);
+    const zone = selectZone(mesh, 0, {
+      tolerance: 20,
+      useAngle: true,
+      useColor: false,
+      contiguous: true,
+    });
+    const op = zoneToSurfaceOp(mesh, zone, "0", "zona-1", 4);
+
+    expect(op.kind).toBe("surface");
+    expect(op.mode).toBe("piece");
+    expect(op.capMode).toBe("planar");
+    expect(op.patch.faces).toHaveLength(zone.faces.length * 3);
+    expect(op.patch.vertices.length).toBeLessThan(mesh.vertices.length);
+    expect(JSON.parse(JSON.stringify(op))).toEqual(op);
+    expect(() =>
+      zoneToSurfaceOp(mesh, zone, "0", "zona-2", 0, "shell")
+    ).toThrow(/profundidad/);
+  });
+
+  it("splits selected face fans that only touch at a vertex", () => {
+    const mesh = cubeMesh(20);
+    let selected: [number, number] | null = null;
+    for (let first = 0; first < mesh.faces.length / 3 && !selected; first += 1) {
+      for (let second = first + 1; second < mesh.faces.length / 3; second += 1) {
+        const firstVertices = [
+          mesh.faces[first * 3],
+          mesh.faces[first * 3 + 1],
+          mesh.faces[first * 3 + 2],
+        ];
+        const secondVertices = new Set([
+          mesh.faces[second * 3],
+          mesh.faces[second * 3 + 1],
+          mesh.faces[second * 3 + 2],
+        ]);
+        if (
+          firstVertices.filter((vertex) => secondVertices.has(vertex)).length ===
+          1
+        ) {
+          selected = [first, second];
+          break;
+        }
+      }
+    }
+    expect(selected).not.toBeNull();
+    const zone = zoneFromFaces(mesh, selected as [number, number]);
+    const op = zoneToSurfaceOp(mesh, zone, "0", "zona-pin", 4, "shell");
+
+    expect(op.patch.vertices).toHaveLength(18);
+    const parts = splitMesh(wasm, mesh, [op]);
+    expect(parts.length).toBeGreaterThan(2);
+    expect(parts.reduce((sum, part) => sum + part.volume, 0)).toBeCloseTo(8000, 2);
+    for (const part of parts) {
+      expect(analyzeMesh(part.mesh).watertight).toBe(true);
+    }
+  });
+
+  it("separates a complete closed surface into a shell and a core", () => {
+    const mesh = cubeMesh(20);
+    const allFaces = Array.from({ length: mesh.faces.length / 3 }, (_, face) => face);
+    const zone = zoneFromFaces(mesh, allFaces);
+    const op = zoneToSurfaceOp(mesh, zone, "0", "zona-completa", 2, "shell");
+    const parts = splitMesh(wasm, mesh, [op]);
+
+    expect(parts).toHaveLength(2);
+    expect(parts.reduce((sum, part) => sum + part.volume, 0)).toBeCloseTo(8000, 2);
+    for (const part of parts) {
+      expect(analyzeMesh(part.mesh).watertight).toBe(true);
     }
   });
 });

@@ -8,6 +8,7 @@ import {
   Ruler,
   Scissors,
   Shapes,
+  Slice,
   Type,
 } from "lucide-react";
 
@@ -114,6 +115,24 @@ export const TOOLS: ToolDefinition[] = [
       "Varita 3D para detectar zonas",
       "Encastres con espiga y holgura",
       "Exportar STL por pieza y 3MF",
+    ],
+  },
+  {
+    slug: "cortador-v2",
+    name: "Cortador v2",
+    description:
+      "Separá un STL o 3MF por regiones con varita inteligente, perímetro 3D ajustable, tapas planas o curvas, encastres y validación de sólidos.",
+    category: "3d",
+    status: "available",
+    icon: Slice,
+    tags: ["stl", "3mf", "corte", "varita", "perímetro", "encastre", "manifold"],
+    features: [
+      "Varita inteligente con sensibilidad",
+      "Perímetro 3D con imán y suavizado",
+      "Tapa plana o curva (membrana mínima)",
+      "Profundidad y vista explosionada",
+      "Encastres con perfiles de tolerancia",
+      "Validación de sólidos y export STL/3MF",
     ],
   },
   {

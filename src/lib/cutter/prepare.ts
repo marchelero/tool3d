@@ -26,7 +26,10 @@ export function planeNormalOf(
   return [normal[0] / length, normal[1] / length, normal[2] / length];
 }
 
-function shapeSpec(op: Extract<CutOp, { kind: "shape" }>, model: LoadedModel): CutSpec {
+function shapeSpec(
+  op: Extract<CutOp, { kind: "shape" }>,
+  model: LoadedModel
+): CutSpec {
   const bounds = model.bounds;
   const rings = buildShapeRings(op.shape, {
     widthMm: op.width,
@@ -46,10 +49,10 @@ function shapeSpec(op: Extract<CutOp, { kind: "shape" }>, model: LoadedModel): C
   const transformed = ring.map(([x, y]) => {
     const rotatedX = x * cos - y * sin;
     const rotatedY = x * sin + y * cos;
-    return [centerX + rotatedX + op.offsetX, centerY + rotatedY + op.offsetY] as [
-      number,
-      number
-    ];
+    return [
+      centerX + rotatedX + op.offsetX,
+      centerY + rotatedY + op.offsetY,
+    ] as [number, number];
   });
   const margin = Math.max(2, Math.max(...bounds.size) * 0.06);
   return {
@@ -92,6 +95,17 @@ export function opsToSpecs(ops: CutOp[], model: LoadedModel): CutSpec[] {
           rings: op.rings,
           min: op.min,
           max: op.max,
+        };
+      }
+      if (op.kind === "surface") {
+        return {
+          kind: "surface",
+          mode: op.mode ?? "shell",
+          capMode: op.capMode ?? "follow",
+          partId: op.partId,
+          patch: op.patch,
+          depth: op.depth,
+          joint: op.joint,
         };
       }
       return shapeSpec(op, model);

@@ -1,7 +1,15 @@
 import { computeBounds } from "@/lib/mesh/bounds";
 import { edgeKey } from "@/lib/mesh/topology";
 import type { MeshBounds, MeshData, Vec3 } from "@/lib/mesh/types";
-import type { CutAxis, PlaneCutOp, RegionCutOp, Ring2 } from "./types";
+import type {
+  CutAxis,
+  PlaneCutOp,
+  RegionCutOp,
+  Ring2,
+  SurfaceCapMode,
+  SurfaceCutMode,
+  SurfaceCutOp,
+} from "./types";
 
 export interface ZoneOptions {
   tolerance: number;
@@ -107,11 +115,15 @@ function parseHexColor(color: string): number {
   const text = color.trim();
   const start = text.charCodeAt(0) === 35 ? 1 : 0;
   if (text.length - start !== 6) return -1;
-  const r = (hexDigit(text.charCodeAt(start)) << 4) | hexDigit(text.charCodeAt(start + 1));
+  const r =
+    (hexDigit(text.charCodeAt(start)) << 4) |
+    hexDigit(text.charCodeAt(start + 1));
   const g =
-    (hexDigit(text.charCodeAt(start + 2)) << 4) | hexDigit(text.charCodeAt(start + 3));
+    (hexDigit(text.charCodeAt(start + 2)) << 4) |
+    hexDigit(text.charCodeAt(start + 3));
   const b =
-    (hexDigit(text.charCodeAt(start + 4)) << 4) | hexDigit(text.charCodeAt(start + 5));
+    (hexDigit(text.charCodeAt(start + 4)) << 4) |
+    hexDigit(text.charCodeAt(start + 5));
   if (r < 0 || g < 0 || b < 0) return -1;
   return (r << 16) | (g << 8) | b;
 }
@@ -179,7 +191,8 @@ function getColorRegions(
       forEachNeighbor(mesh, cache, face, (neighbor) => {
         if (labels[neighbor] !== -1) return;
         const color = colorData[neighbor];
-        if (color < 0 || colorDistancePacked(seedColor, color) > colorLimit) return;
+        if (color < 0 || colorDistancePacked(seedColor, color) > colorLimit)
+          return;
         if (useAngle) {
           const dot =
             normals[face * 3] * normals[neighbor * 3] +
@@ -290,7 +303,9 @@ export function selectZone(
     faceColors && faceColors.length === cache.faceCount
   );
   const colorData =
-    options.useColor && colorsAvailable ? getColorData(faceColors as string[]) : null;
+    options.useColor && colorsAvailable
+      ? getColorData(faceColors as string[])
+      : null;
   const tolerance = Math.min(100, Math.max(0, options.tolerance));
   const angleLimit = 5 + (tolerance / 100) * 175;
   const colorLimit = 3 + (tolerance / 100) * 90;
@@ -399,7 +414,7 @@ export function selectZone(
     mesh,
     cache,
     selected,
-    colorData ? faceColors ?? null : null
+    colorData ? (faceColors ?? null) : null
   );
   if (cacheKey) {
     let map = zoneResultCaches.get(mesh);
@@ -443,8 +458,15 @@ export function zoneFromFaces(
   if (selected.size === 0) {
     throw new Error("La zona no tiene caras seleccionadas");
   }
-  const hasColors = Boolean(faceColors && faceColors.length === cache.faceCount);
-  return buildZoneResult(mesh, cache, selected, hasColors ? faceColors ?? null : null);
+  const hasColors = Boolean(
+    faceColors && faceColors.length === cache.faceCount
+  );
+  return buildZoneResult(
+    mesh,
+    cache,
+    selected,
+    hasColors ? (faceColors ?? null) : null
+  );
 }
 
 function buildZoneResult(
@@ -620,9 +642,7 @@ export function zoneToPlaneOp(zone: ZoneResult, id: string): PlaneCutOp {
     nz / length,
   ];
   const offset =
-    normal[0] * centroid[0] +
-    normal[1] * centroid[1] +
-    normal[2] * centroid[2];
+    normal[0] * centroid[0] + normal[1] * centroid[1] + normal[2] * centroid[2];
   return {
     id,
     kind: "plane",
@@ -665,6 +685,136 @@ export function zoneToRegionOp(
     max: Math.max(outside, inside),
     label: `Zona de ${zone.triangles} caras`,
     enabled: true,
+  };
+}
+
+export function zoneToSurfaceOp(
+  mesh: MeshData,
+  zone: ZoneResult,
+  partId: string,
+  id: string,
+  depth: number,
+  mode: SurfaceCutMode = "piece",
+  capMode: SurfaceCapMode = "planar"
+): SurfaceCutOp {
+  if (mode === "shell" && (!Number.isFinite(depth) || depth <= 0)) {
+    throw new Error("La profundidad debe ser mayor que cero");
+  }
+
+  const selectedFaces = [...new Set(zone.faces)];
+  if (selectedFaces.length === 0) {
+    throw new Error("La zona no tiene caras seleccionadas");
+  }
+
+  const vertexFaces = new Map<number, number[]>();
+  const edgeFaces = new Map<
+    number,
+    { first: number; second: number; faces: number[] }
+  >();
+  for (const face of selectedFaces) {
+    for (let corner = 0; corner < 3; corner += 1) {
+      const vertex = mesh.faces[face * 3 + corner];
+      if (vertex === undefined || vertex * 3 + 2 >= mesh.vertices.length) {
+        throw new Error("La selección ya no coincide con la pieza visible");
+      }
+      const incident = vertexFaces.get(vertex);
+      if (incident) incident.push(face);
+      else vertexFaces.set(vertex, [face]);
+
+      const next = mesh.faces[face * 3 + ((corner + 1) % 3)];
+      if (next === undefined) {
+        throw new Error("La selección ya no coincide con la pieza visible");
+      }
+      const key = edgeKey(vertex, next, mesh.vertices.length / 3);
+      const edge = edgeFaces.get(key);
+      if (edge) edge.faces.push(face);
+      else edgeFaces.set(key, { first: vertex, second: next, faces: [face] });
+    }
+  }
+
+  const edgesByVertex = new Map<
+    number,
+    Array<{ first: number; second: number; faces: number[] }>
+  >();
+  for (const edge of edgeFaces.values()) {
+    for (const vertex of [edge.first, edge.second]) {
+      const incident = edgesByVertex.get(vertex);
+      if (incident) incident.push(edge);
+      else edgesByVertex.set(vertex, [edge]);
+    }
+  }
+
+  const fanFaces = new Map<number, Map<number, number>>();
+  for (const [vertex, incidentFaces] of vertexFaces) {
+    const parents = new Map(incidentFaces.map((face) => [face, face]));
+    const find = (face: number): number => {
+      const parent = parents.get(face);
+      if (parent === undefined || parent === face) return face;
+      const root = find(parent);
+      parents.set(face, root);
+      return root;
+    };
+    const union = (first: number, second: number) => {
+      const firstRoot = find(first);
+      const secondRoot = find(second);
+      if (firstRoot !== secondRoot) parents.set(secondRoot, firstRoot);
+    };
+
+    for (const edge of edgesByVertex.get(vertex) ?? []) {
+      if (edge.faces.length < 2) continue;
+      for (let index = 1; index < edge.faces.length; index += 1) {
+        union(edge.faces[0], edge.faces[index]);
+      }
+    }
+
+    const roots = new Map<number, number>();
+    for (const face of incidentFaces) roots.set(face, find(face));
+    fanFaces.set(vertex, roots);
+  }
+
+  const remap = new Map<string, number>();
+  const vertices: number[] = [];
+  const faces: number[] = [];
+  for (const face of selectedFaces) {
+    for (let corner = 0; corner < 3; corner += 1) {
+      const source = mesh.faces[face * 3 + corner];
+      if (source === undefined) {
+        throw new Error("La selección ya no coincide con la pieza visible");
+      }
+      const root = fanFaces.get(source)?.get(face);
+      if (root === undefined) {
+        throw new Error("No se pudo normalizar la topología de la zona");
+      }
+      const fanKey = `${source}:${root}`;
+      let target = remap.get(fanKey);
+      if (target === undefined) {
+        target = vertices.length / 3;
+        remap.set(fanKey, target);
+        vertices.push(
+          mesh.vertices[source * 3],
+          mesh.vertices[source * 3 + 1],
+          mesh.vertices[source * 3 + 2]
+        );
+      }
+      faces.push(target);
+    }
+  }
+
+  if (
+    faces.length < 3 ||
+    vertices.some((value) => !Number.isFinite(value))
+  ) {
+    throw new Error("La zona no contiene una superficie válida");
+  }
+  return {
+    id,
+    kind: "surface",
+    mode,
+    capMode,
+    enabled: true,
+    partId,
+    patch: { vertices, faces },
+    depth,
   };
 }
 

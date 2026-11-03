@@ -1,4 +1,4 @@
-import type { CutOp, CutterPartView } from "./types";
+import type { CutOp, CutterPartView, JointOptions } from "./types";
 
 export interface AssemblyReportInput {
   fileName: string;
@@ -20,7 +20,23 @@ function opLabel(op: CutOp): string {
   if (op.kind === "curve") return `Onda en ${op.axis.toUpperCase()}`;
   if (op.kind === "shape") return `Forma ${op.shape}`;
   if (op.kind === "components") return "Objetos";
+  if (op.kind === "surface") {
+    if (op.mode !== "piece") {
+      return `Cáscara superficial (${format(op.depth, 1)} mm)`;
+    }
+    const cap =
+      op.capMode === "planar" ? "tapa recta" : "contorno 3D";
+    return `Pieza completa por contorno (${cap})`;
+  }
   return op.label ?? "Zona separada";
+}
+
+function jointLabel(variant: JointOptions["variant"]): string {
+  if (variant === "dowel") return "espiga";
+  if (variant === "keyed") return "llave anti-rotación";
+  if (variant === "dovetail") return "cola de milano";
+  if (variant === "magnet") return "alojamientos para imanes";
+  return "";
 }
 
 export function buildAssemblyReport({
@@ -61,15 +77,27 @@ export function buildAssemblyReport({
   } else {
     ops.forEach((op, index) => {
       const joint =
-        op.kind === "plane" && op.joint
-          ? ` · encastre Ø${format(op.joint.diameter, 1)} mm, largo ${format(
-              op.joint.length,
-              1
-            )} mm, holgura ${format(op.joint.clearance, 2)} mm${
-              op.joint.count && op.joint.count > 1
-                ? `, ×${op.joint.count}`
-                : ""
-            }`
+        (op.kind === "plane" || op.kind === "surface") && op.joint
+          ? op.joint.variant === "magnet"
+            ? ` · ${jointLabel(op.joint.variant)} Ø${format(
+                op.joint.diameter,
+                1
+              )} mm, profundidad ${format(op.joint.length, 1)} mm, holgura radial ${format(
+                op.joint.clearance,
+                2
+              )} mm${
+                op.joint.count && op.joint.count > 1
+                  ? `, ×${op.joint.count}`
+                  : ""
+              }`
+            : ` · encastre Ø${format(op.joint.diameter, 1)} mm, largo ${format(
+                op.joint.length,
+                1
+              )} mm, holgura ${format(op.joint.clearance, 2)} mm${
+                op.joint.count && op.joint.count > 1
+                  ? `, ×${op.joint.count}`
+                  : ""
+              }${op.joint.variant ? `, ${jointLabel(op.joint.variant)}` : ""}`
           : "";
       lines.push(
         `${index + 1}. ${opLabel(op)}${op.enabled ? "" : " (desactivado)"}${joint}`

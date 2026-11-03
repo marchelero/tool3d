@@ -133,6 +133,8 @@ export function CutterViewer({
   showCutPreviews = true,
   onTransformCut,
   onEditRegionNode,
+  jointPlacementId,
+  onPlaceJoint,
   className,
 }: {
   parts: CutterPartView[];
@@ -160,6 +162,8 @@ export function CutterViewer({
     pointIndex: number,
     point: [number, number]
   ) => void;
+  jointPlacementId?: string | null;
+  onPlaceJoint?: (id: string, point: [number, number, number]) => void;
   className?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -183,6 +187,8 @@ export function CutterViewer({
   const onMoveCutRef = useRef(onMoveCut);
   const onTransformCutRef = useRef(onTransformCut);
   const onEditRegionNodeRef = useRef(onEditRegionNode);
+  const jointPlacementIdRef = useRef(jointPlacementId);
+  const onPlaceJointRef = useRef(onPlaceJoint);
 
   const [showGrid, setShowGrid] = useState(true);
   const [wireframe, setWireframe] = useState(false);
@@ -197,10 +203,16 @@ export function CutterViewer({
     onMoveCutRef.current = onMoveCut;
     onTransformCutRef.current = onTransformCut;
     onEditRegionNodeRef.current = onEditRegionNode;
+    jointPlacementIdRef.current = jointPlacementId;
+    onPlaceJointRef.current = onPlaceJoint;
     const renderer = rendererRef.current;
     if (renderer) {
       renderer.domElement.style.cursor =
-        pickMode || placement ? "crosshair" : moveMode ? "move" : "";
+        pickMode || placement || jointPlacementId
+          ? "crosshair"
+          : moveMode
+            ? "move"
+            : "";
     }
   }, [
     onPickFace,
@@ -212,6 +224,8 @@ export function CutterViewer({
     onMoveCut,
     onTransformCut,
     onEditRegionNode,
+    jointPlacementId,
+    onPlaceJoint,
   ]);
 
   useEffect(() => {
@@ -505,9 +519,20 @@ export function CutterViewer({
       renderer.domElement.style.cursor = "";
     };
 
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.button !== 0) return;
-      const active = placementRef.current;
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    const jointPlacementId = jointPlacementIdRef.current;
+    if (jointPlacementId) {
+      event.preventDefault();
+      event.stopPropagation();
+      const result = hitAt(event);
+      if (result) {
+        const point = result.found.mesh.worldToLocal(result.hit.point.clone());
+        onPlaceJointRef.current?.(jointPlacementId, [point.x, point.y, point.z]);
+      }
+      return;
+    }
+    const active = placementRef.current;
       if (active) {
         const result = hitAt(event);
         if (!result) return;

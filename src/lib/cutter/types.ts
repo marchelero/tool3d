@@ -15,7 +15,9 @@ export interface JointOptions {
   length: number;
   clearance: number;
   count?: number;
-  variant?: "dowel" | "keyed" | "dovetail";
+  distribution?: "auto" | "manual";
+  positions?: [number, number, number][];
+  variant?: "dowel" | "keyed" | "dovetail" | "magnet";
 }
 
 export interface PlaneCutOp extends CutOpBase {
@@ -58,12 +60,31 @@ export interface ComponentCutOp extends CutOpBase {
   kind: "components";
 }
 
+export interface SurfacePatch {
+  vertices: number[];
+  faces: number[];
+}
+
+export type SurfaceCutMode = "piece" | "shell";
+export type SurfaceCapMode = "planar" | "follow";
+
+export interface SurfaceCutOp extends CutOpBase {
+  kind: "surface";
+  mode?: SurfaceCutMode;
+  capMode?: SurfaceCapMode;
+  partId: string;
+  patch: SurfacePatch;
+  depth: number;
+  joint?: JointOptions;
+}
+
 export type CutOp =
   | PlaneCutOp
   | CurveCutOp
   | ShapeCutOp
   | RegionCutOp
-  | ComponentCutOp;
+  | ComponentCutOp
+  | SurfaceCutOp;
 
 export interface PlaneSpec {
   kind: "plane";
@@ -100,12 +121,18 @@ export interface ComponentSpec {
   kind: "components";
 }
 
+export interface SurfaceSpec {
+  kind: "surface";
+  mode?: SurfaceCutMode;
+  capMode?: SurfaceCapMode;
+  partId: string;
+  patch: SurfacePatch;
+  depth: number;
+  joint?: JointOptions;
+}
+
 export type CutSpec =
-  | PlaneSpec
-  | CurveSpec
-  | ShapeSpec
-  | RegionSpec
-  | ComponentSpec;
+  PlaneSpec | CurveSpec | ShapeSpec | RegionSpec | ComponentSpec | SurfaceSpec;
 
 export interface CutPart {
   id: string;
@@ -168,9 +195,7 @@ export interface CutterCutRequest {
 }
 
 export type CutterRequest =
-  | CutterCutRequest
-  | CutterSuggestRequest
-  | CutterSeparateRequest;
+  CutterCutRequest | CutterSuggestRequest | CutterSeparateRequest;
 
 export interface CutterPartView {
   id: string;

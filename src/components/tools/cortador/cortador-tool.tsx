@@ -60,6 +60,7 @@ import {
   type KeychainShape,
 } from "@/lib/3d/shapes";
 import { getManifoldWasmUrl } from "@/lib/cutter/manifold";
+import { redoHistory, undoHistory } from "@/lib/cutter/history";
 import { loadModelFile } from "@/lib/cutter/load-model";
 import {
   downloadAllStl,
@@ -83,6 +84,9 @@ import type {
   PlaneCutOp,
   RegionCutOp,
   ShapeCutOp,
+  SurfaceCapMode,
+  SurfaceCutMode,
+  SurfaceCutOp,
 } from "@/lib/cutter/types";
 import { CutterProcessor } from "@/lib/cutter/worker-client";
 import { loadProject, saveProject } from "@/lib/cutter/project";
@@ -90,7 +94,7 @@ import { buildAssemblyReport } from "@/lib/cutter/report";
 import {
   selectZone,
   zoneFromFaces,
-  zoneToPlaneOp,
+  zoneToSurfaceOp,
   type ZoneOptions,
   type ZoneResult,
 } from "@/lib/cutter/zones";
@@ -108,6 +112,7 @@ function opLabel(op: CutOp): string {
   if (op.kind === "curve") return `Onda ${AXIS_LABEL[op.axis]}`;
   if (op.kind === "shape") return `Forma ${SHAPE_LABELS[op.shape]}`;
   if (op.kind === "components") return "Objetos";
+  if (op.kind === "surface") return "Separación superficial";
   return op.label ?? "Zona";
 }
 
@@ -222,11 +227,183 @@ function StepRow({ step }: { step: RepairStep }) {
   );
 }
 
+function SurfaceJointSettings({
+  surfaceOps,
+  modelSize,
+  onUpdate,
+}: {
+  surfaceOps: SurfaceCutOp[];
+  modelSize: [number, number, number];
+  onUpdate: (
+    id: string,
+    update: Partial<
+      Pick<SurfaceCutOp, "depth" | "joint" | "mode" | "capMode">
+    >
+  ) => void;
+}) {
+  if (surfaceOps.length === 0) return null;
+
+  return (
+    <PanelSection
+      icon={Link2}
+      title="3 · Ajustar tapa y encastres"
+      summary={`${surfaceOps.length} zona${surfaceOps.length === 1 ? "" : "s"}`}
+    >
+      <p className="text-xs text-muted-foreground">
+        Elegí el cierre y el tipo de unión. Cada ajuste recalcula la vista previa
+        antes de poder confirmarse.
+      </p>
+      {surfaceOps.map((surface) => {
+        const joint = surface.joint;
+        const maxDimension = Math.max(2, Math.min(...modelSize) * 0.45);
+        return (
+          <div
+            key={surface.id}
+            className="space-y-2 rounded-lg border bg-muted/20 p-2.5"
+          >
+            <GroupLabel>
+              {surface.mode === "piece"
+                ? "Pieza completa"
+                : `Cáscara · ${surface.depth} mm`}
+            </GroupLabel>
+            {surface.mode === "piece" ? (
+              <label className="flex items-center justify-between gap-2 text-xs">
+                Tapa del corte
+                <select
+                  aria-label="Forma de la tapa del corte"
+                  className="h-9 rounded-md border bg-background px-2 text-xs text-foreground"
+                  value={surface.capMode ?? "follow"}
+                  onChange={(event) =>
+                    onUpdate(surface.id, {
+                      capMode: event.target.value as SurfaceCapMode,
+                    })
+                  }
+                >
+                  <option value="planar">Recta y plana</option>
+                  <option value="follow">Seguir forma 3D</option>
+                </select>
+              </label>
+            ) : null}
+            <label className="flex items-center justify-between gap-2 text-xs">
+              Tipo
+              <select
+                aria-label="Tipo de encastre superficial"
+                className="h-9 rounded-md border bg-background px-2 text-xs text-foreground"
+                value={joint?.variant ?? "none"}
+                onChange={(event) => {
+                  const variant = event.target.value;
+                  if (variant === "none") {
+                    onUpdate(surface.id, { joint: undefined });
+                    return;
+                  }
+                  onUpdate(surface.id, {
+                    joint: {
+                      diameter:
+                        variant === "magnet"
+                          ? joint?.variant === "magnet"
+                            ? joint.diameter
+                            : 6
+                          : joint?.diameter ?? 5,
+                      length:
+                        variant === "magnet"
+                          ? joint?.variant === "magnet"
+                            ? joint.length
+                            : 3
+                          : joint?.length ?? 6,
+                      clearance: joint?.clearance ?? 0.2,
+                      count: joint?.count ?? 1,
+                      variant: variant as NonNullable<
+                        SurfaceCutOp["joint"]
+                      >["variant"],
+                    },
+                  });
+                }}
+              >
+                <option value="none">Sin encastre</option>
+                <option value="dowel">Espiga</option>
+                <option value="keyed">Llave anti-rotación</option>
+                <option value="dovetail">Cola de milano</option>
+                <option value="magnet">Alojamiento para imán</option>
+              </select>
+            </label>
+            {joint ? (
+              <>
+                {joint.variant === "magnet" ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Deja cavidades enfrentadas para imanes de disco; se insertan
+                    después de imprimir.
+                  </p>
+                ) : null}
+                <JointSlider
+                  label="Diámetro"
+                  value={joint.diameter}
+                  min={2}
+                  max={maxDimension}
+                  step={0.5}
+                  onChange={(diameter) =>
+                    onUpdate(surface.id, { joint: { ...joint, diameter } })
+                  }
+                />
+                <JointSlider
+                  label={joint.variant === "magnet" ? "Profundidad" : "Largo"}
+                  value={joint.length}
+                  min={1.5}
+                  max={Math.max(2, surface.depth * 3)}
+                  step={0.5}
+                  onChange={(length) =>
+                    onUpdate(surface.id, { joint: { ...joint, length } })
+                  }
+                />
+                <JointSlider
+                  label="Holgura"
+                  value={joint.clearance}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(clearance) =>
+                    onUpdate(surface.id, { joint: { ...joint, clearance } })
+                  }
+                />
+                <JointSlider
+                  label="Cantidad"
+                  value={joint.count ?? 1}
+                  min={1}
+                  max={4}
+                  step={1}
+                  suffix=""
+                  digits={0}
+                  onChange={(count) =>
+                    onUpdate(surface.id, { joint: { ...joint, count } })
+                  }
+                />
+              </>
+            ) : null}
+          </div>
+        );
+      })}
+    </PanelSection>
+  );
+}
+
 export function CortadorTool() {
   const processorRef = useRef<CutterProcessor | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const dragDepthRef = useRef(0);
   const regionToastAtRef = useRef(0);
+  const zonePreviewSnapshotRef = useRef<{
+    ops: CutOp[];
+    parts: CutterPartView[];
+    selectedPartId: string | null;
+    dirty: boolean;
+    partOffsets: Record<string, [number, number, number]>;
+    exploded: number;
+    zone: { partId: string; zone: ZoneResult } | null;
+    pickMode: boolean;
+    activeCutId: string | null;
+    history: CutOp[][];
+    future: CutOp[][];
+  } | null>(null);
+  const zonePreviewOpsRef = useRef<CutOp[] | null>(null);
 
   const [model, setModel] = useState<LoadedModel | null>(null);
   const [parts, setParts] = useState<CutterPartView[]>([]);
@@ -267,11 +444,14 @@ export function CortadorTool() {
     contiguous: true,
   });
   const [zoneDepth, setZoneDepth] = useState(4);
+  const [zoneCutMode, setZoneCutMode] = useState<SurfaceCutMode>("piece");
+  const [zoneCapMode, setZoneCapMode] = useState<SurfaceCapMode>("planar");
+  const [zonePreviewPending, setZonePreviewPending] = useState(false);
+  const [zonePreviewValid, setZonePreviewValid] = useState(false);
   const [history, setHistory] = useState<CutOp[][]>([]);
   const [future, setFuture] = useState<CutOp[][]>([]);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [hasSaved, setHasSaved] = useState(false);
-
   useEffect(() => {
     const timer = window.setTimeout(() => {
       loadProject()
@@ -295,6 +475,12 @@ export function CortadorTool() {
     setOps([]);
     setDirty(false);
     setPreviewing(false);
+    zonePreviewSnapshotRef.current = null;
+    zonePreviewOpsRef.current = null;
+    setZonePreviewPending(false);
+    setZonePreviewValid(false);
+    setZoneCutMode("piece");
+    setZoneCapMode("planar");
     setRepairSteps([]);
     setRepairWarnings([]);
     setExploded(0);
@@ -544,10 +730,7 @@ export function CortadorTool() {
     setDirty(true);
   };
 
-  const applyPlacement = (
-    offset: number,
-    point: [number, number, number]
-  ) => {
+  const applyPlacement = (offset: number, point: [number, number, number]) => {
     if (!placing || !model) return;
     if (placing.target === "curve") {
       updateCurve(placing.id, { offset });
@@ -585,25 +768,37 @@ export function CortadorTool() {
   };
 
   const undo = () => {
-    if (history.length === 0) return;
-    const previous = history[history.length - 1];
-    setHistory(history.slice(0, -1));
-    setFuture([ops, ...future].slice(0, 40));
+    if (!model || busy || zonePreviewPending) return;
+    const transition = undoHistory(ops, history, future);
+    if (!transition) return;
+    const previous = transition.value;
+    processorRef.current?.cancel();
+    setHistory(transition.past);
+    setFuture(transition.future);
     setOps(previous);
     setDirty(true);
     setPlacing(null);
     setZone(null);
+    setActiveCutId(null);
+    setError(null);
+    runCuts(previous, model);
   };
 
   const redo = () => {
-    if (future.length === 0) return;
-    const next = future[0];
-    setFuture(future.slice(1));
-    setHistory([...history.slice(-39), ops]);
+    if (!model || busy || zonePreviewPending) return;
+    const transition = redoHistory(ops, history, future);
+    if (!transition) return;
+    const next = transition.value;
+    processorRef.current?.cancel();
+    setFuture(transition.future);
+    setHistory(transition.past);
     setOps(next);
     setDirty(true);
     setPlacing(null);
     setZone(null);
+    setActiveCutId(null);
+    setError(null);
+    runCuts(next, model);
   };
 
   const handleMovePart = useCallback(
@@ -628,11 +823,7 @@ export function CortadorTool() {
           colors
         );
         let nextZone = result;
-        if (
-          pick.action !== "replace" &&
-          zone &&
-          zone.partId === part.id
-        ) {
+        if (pick.action !== "replace" && zone && zone.partId === part.id) {
           const faces = new Set(zone.zone.faces);
           let changed = false;
           if (pick.action === "add") {
@@ -672,103 +863,133 @@ export function CortadorTool() {
     [model, parts, zone, zoneOptions]
   );
 
-  const runCuts = useCallback((nextOps: CutOp[], source: LoadedModel | null = model, preview = false) => {
-    if (!source) return;
-    const specs = opsToSpecs(nextOps, source);
-    if (specs.length === 0) {
-      if (preview) return;
-      setPreviewing(false);
-      const single = singlePart(source);
-      setParts([single]);
-      setSelectedPartId(single.id);
-      setPartOffsets({});
-      setExploded(0);
-      setDirty(false);
-      return;
-    }
-    processorRef.current?.cancel();
-    const processor = new CutterProcessor();
-    processorRef.current = processor;
-    setBusy({ label: "Cortando la pieza", progress: 0 });
-    setError(null);
-
-    processor
-      .cut(source.mesh, specs, getManifoldWasmUrl(), (progress, phase) => {
-        setBusy({ label: phase, progress });
-      })
-      .then((result) => {
-        const candidates = finalizeParts(result.parts);
-        const views = candidates.filter((part) => part.volume > 1e-4);
-        const discarded = candidates.length - views.length;
-        if (views.length === 0) {
-          const message =
-            "El corte no generó piezas válidas. Revisá los planos o la zona.";
-          setError(message);
-          toast.error(message);
-          return;
-        }
-        if (discarded > 0) {
-          toast.info(`${discarded} fragmento(s) sin volumen descartados`);
-        }
-        setParts(views);
-        setPreviewing(preview);
-        if (result.warnings && result.warnings.length > 0) {
-          toast.warning(result.warnings[0]);
-        }
-        setSelectedPartId(views[0]?.id ?? null);
-        if (!preview) {
-          setDirty(false);
-          setZone(null);
-          setPickMode(false);
-          setPlacing(null);
-          setActiveCutId(null);
-          setMoveMode(false);
-        }
+  const runCuts = useCallback(
+    (nextOps: CutOp[], source: LoadedModel | null = model, preview = false) => {
+      if (!source) return;
+      const specs = opsToSpecs(nextOps, source);
+      if (specs.length === 0) {
+        if (preview) return;
+        setPreviewing(false);
+        const single = singlePart(source);
+        setParts([single]);
+        setSelectedPartId(single.id);
         setPartOffsets({});
-        setExploded(views.length > 1 ? (preview ? 0.12 : 0.3) : 0);
-        const componentOnly =
-          views.length <= 1 &&
-          nextOps.some((op) => op.kind === "components");
-        const invalid = views.filter(
-          (part) =>
-            !part.diagnostics.watertight || !part.diagnostics.outward
-        );
-        if (invalid.length > 0) {
-          toast.warning(
-            `${invalid.length} pieza(s) no quedaron cerradas. Revisá el diagnóstico antes de exportar.`
-          );
-        }
-        if (preview) {
-          toast.info(
-            `Vista previa: ${views.length} pieza(s). Ajustá el corte o pulsá Aplicar cortes para confirmar.`
-          );
-        } else if (invalid.length === 0) {
-          if (componentOnly) {
-            toast.info(
-              "El modelo es una sola cáscara: no hay objetos separados. Usá cortes, la varita o Separar formas automáticamente."
-            );
-          } else {
-            toast.success(
-              `${views.length} pieza${views.length === 1 ? "" : "s"} lista${
-                views.length === 1 ? "" : "s"
-              } en ${formatNumber(result.ms, 0)} ms`
+        setExploded(0);
+        setDirty(false);
+        return;
+      }
+      processorRef.current?.cancel();
+      const processor = new CutterProcessor();
+      processorRef.current = processor;
+      setBusy({ label: "Cortando la pieza", progress: 0 });
+      setError(null);
+
+      processor
+        .cut(source.mesh, specs, getManifoldWasmUrl(), (progress, phase) => {
+          setBusy({ label: phase, progress });
+        })
+        .then((result) => {
+          const candidates = finalizeParts(result.parts);
+          const views = candidates.filter((part) => part.volume > 1e-4);
+          const discarded = candidates.length - views.length;
+          if (views.length === 0) {
+            throw new Error(
+              "El corte no generó piezas válidas. Revisá los planos o la zona."
             );
           }
-        }
-      })
-      .catch((cutError: unknown) => {
-        const message =
-          cutError instanceof Error
-            ? cutError.message
-            : "No se pudo cortar la pieza";
-        if (message === "cancelado") return;
-        setError(message);
-        toast.error(message);
-      })
-      .finally(() => {
-        setBusy(null);
-      });
-  }, [model]);
+          if (discarded > 0) {
+            toast.info(`${discarded} fragmento(s) sin volumen descartados`);
+          }
+          const invalid = views.filter(
+            (part) => !part.diagnostics.watertight || !part.diagnostics.outward
+          );
+          if (
+            specs.some((spec) => spec.kind === "surface") &&
+            invalid.length > 0
+          ) {
+            throw new Error(
+              "La separación no produjo dos piezas cerradas. Ajustá la selección o reducí la profundidad."
+            );
+          }
+          setParts(views);
+          setPreviewing(preview);
+          if (preview && zonePreviewSnapshotRef.current) {
+            zonePreviewOpsRef.current = nextOps;
+            setZonePreviewValid(true);
+          }
+          if (result.warnings && result.warnings.length > 0) {
+            toast.warning(result.warnings[0]);
+          }
+          setSelectedPartId(views[0]?.id ?? null);
+          if (!preview) {
+            setDirty(false);
+            setZone(null);
+            setPickMode(false);
+            setPlacing(null);
+            setActiveCutId(null);
+            setMoveMode(false);
+          }
+          setPartOffsets({});
+          setExploded(views.length > 1 ? (preview ? 0.12 : 0.3) : 0);
+          const componentOnly =
+            views.length <= 1 && nextOps.some((op) => op.kind === "components");
+          if (invalid.length > 0) {
+            toast.warning(
+              `${invalid.length} pieza(s) no quedaron cerradas. Revisá el diagnóstico antes de exportar.`
+            );
+          }
+          if (preview) {
+            toast.info(
+              `Vista previa: ${views.length} pieza(s). Ajustá el corte o pulsá Aplicar cortes para confirmar.`
+            );
+          } else if (invalid.length === 0) {
+            if (componentOnly) {
+              toast.info(
+                "El modelo es una sola cáscara: no hay objetos separados. Usá cortes, la varita o Separar formas automáticamente."
+              );
+            } else {
+              toast.success(
+                `${views.length} pieza${views.length === 1 ? "" : "s"} lista${
+                  views.length === 1 ? "" : "s"
+                } en ${formatNumber(result.ms, 0)} ms`
+              );
+            }
+          }
+        })
+        .catch((cutError: unknown) => {
+          const message =
+            cutError instanceof Error
+              ? cutError.message
+              : "No se pudo cortar la pieza";
+          if (message === "cancelado") return;
+          const snapshot = zonePreviewSnapshotRef.current;
+          if (snapshot) {
+            setOps(snapshot.ops);
+            setParts(snapshot.parts);
+            setSelectedPartId(snapshot.selectedPartId);
+            setDirty(snapshot.dirty);
+            setPartOffsets(snapshot.partOffsets);
+            setExploded(snapshot.exploded);
+            setZone(snapshot.zone);
+            setPickMode(snapshot.pickMode);
+            setActiveCutId(snapshot.activeCutId);
+            setHistory(snapshot.history);
+            setFuture(snapshot.future);
+            setPreviewing(false);
+            setZonePreviewValid(false);
+            setZonePreviewPending(false);
+            zonePreviewSnapshotRef.current = null;
+            zonePreviewOpsRef.current = null;
+          }
+          setError(message);
+          toast.error(message);
+        })
+        .finally(() => {
+          setBusy(null);
+        });
+    },
+    [model]
+  );
 
   const applyCuts = useCallback(() => {
     setPlacing(null);
@@ -792,13 +1013,15 @@ export function CortadorTool() {
           );
           return;
         }
-        const added: PlaneCutOp[] = result.suggestions.map((suggestion, index) => ({
-          id: nextOpId(ops, `auto${index}`),
-          kind: "plane",
-          axis: suggestion.axis,
-          offset: suggestion.offset,
-          enabled: true,
-        }));
+        const added: PlaneCutOp[] = result.suggestions.map(
+          (suggestion, index) => ({
+            id: nextOpId(ops, `auto${index}`),
+            kind: "plane",
+            axis: suggestion.axis,
+            offset: suggestion.offset,
+            enabled: true,
+          })
+        );
         const next = [...ops, ...added];
         setHistory((current) => [...current.slice(-39), ops]);
         setFuture([]);
@@ -945,8 +1168,36 @@ export function CortadorTool() {
     if (!zone) return;
     setPlacing(null);
     try {
-      const op = zoneToPlaneOp(zone.zone, nextOpId(ops, "zone"));
+      const part = parts.find((candidate) => candidate.id === zone.partId);
+      if (!part || !model) {
+        throw new Error("La pieza seleccionada ya no está disponible");
+      }
+      const op = zoneToSurfaceOp(
+        part.mesh,
+        zone.zone,
+        zone.partId,
+        nextOpId(ops, "zone"),
+        zoneDepth,
+        zoneCutMode,
+        zoneCapMode
+      );
       const next = [...ops, op];
+      zonePreviewSnapshotRef.current = {
+        ops,
+        parts,
+        selectedPartId,
+        dirty,
+        partOffsets,
+        exploded,
+        zone,
+        pickMode,
+        activeCutId,
+        history,
+        future,
+      };
+      zonePreviewOpsRef.current = null;
+      setZonePreviewPending(true);
+      setZonePreviewValid(false);
       setHistory((current) => [...current.slice(-39), ops]);
       setFuture([]);
       setOps(next);
@@ -954,9 +1205,7 @@ export function CortadorTool() {
       setShowPlanes(true);
       setActiveCutId(op.id);
       setZone(null);
-      toast.info(
-        "Plano ajustable agregado. Movelo o giralo hasta la base de la pieza y pulsá Aplicar cortes."
-      );
+      runCuts(next, model, true);
     } catch (zoneError) {
       const message =
         zoneError instanceof Error
@@ -964,7 +1213,120 @@ export function CortadorTool() {
           : "No se pudo separar la zona";
       toast.error(message);
     }
-  }, [ops, zone]);
+  }, [
+    activeCutId,
+    dirty,
+    exploded,
+    future,
+    history,
+    model,
+    ops,
+    partOffsets,
+    parts,
+    pickMode,
+    runCuts,
+    selectedPartId,
+    zone,
+    zoneCapMode,
+    zoneCutMode,
+    zoneDepth,
+  ]);
+
+  const cancelZonePreview = useCallback(() => {
+    const snapshot = zonePreviewSnapshotRef.current;
+    if (!snapshot) return;
+    processorRef.current?.cancel();
+    setOps(snapshot.ops);
+    setParts(snapshot.parts);
+    setSelectedPartId(snapshot.selectedPartId);
+    setDirty(snapshot.dirty);
+    setPartOffsets(snapshot.partOffsets);
+    setExploded(snapshot.exploded);
+    setZone(snapshot.zone);
+    setPickMode(snapshot.pickMode);
+    setActiveCutId(snapshot.activeCutId);
+    setHistory(snapshot.history);
+    setFuture(snapshot.future);
+    setPreviewing(false);
+    setZonePreviewValid(false);
+    zonePreviewSnapshotRef.current = null;
+    zonePreviewOpsRef.current = null;
+    setZonePreviewPending(false);
+    toast.info("Separación cancelada");
+  }, []);
+
+  const confirmZonePreview = useCallback(() => {
+    if (
+      !zonePreviewSnapshotRef.current ||
+      !zonePreviewValid ||
+      zonePreviewOpsRef.current !== ops ||
+      busy
+    ) {
+      return;
+    }
+    setPreviewing(false);
+    setDirty(false);
+    setZonePreviewValid(false);
+    zonePreviewSnapshotRef.current = null;
+    zonePreviewOpsRef.current = null;
+    setZonePreviewPending(false);
+    setPickMode(false);
+    setActiveCutId(null);
+    toast.success(
+      "Separación confirmada. Las piezas están listas para exportar."
+    );
+  }, [busy, ops, zonePreviewValid]);
+
+  const updateSurfaceCut = useCallback(
+    (
+      id: string,
+      update: Partial<
+        Pick<SurfaceCutOp, "depth" | "joint" | "mode" | "capMode">
+      >
+    ) => {
+      if (!zonePreviewSnapshotRef.current) {
+        zonePreviewSnapshotRef.current = {
+          ops,
+          parts,
+          selectedPartId,
+          dirty,
+          partOffsets,
+          exploded,
+          zone,
+          pickMode,
+          activeCutId,
+          history,
+          future,
+        };
+        setHistory((current) => [...current.slice(-39), ops]);
+        setFuture([]);
+      }
+      const next = ops.map((op) =>
+        op.id === id && op.kind === "surface" ? { ...op, ...update } : op
+      );
+      setZonePreviewPending(true);
+      setOps(next);
+      setDirty(true);
+      setZonePreviewValid(false);
+      zonePreviewOpsRef.current = null;
+      if (model) runCuts(next, model, true);
+    },
+    [
+      activeCutId,
+      dirty,
+      exploded,
+      future,
+      history,
+      model,
+      ops,
+      partOffsets,
+      parts,
+      pickMode,
+      runCuts,
+      selectedPartId,
+      zone,
+    ]
+  );
 
   const handleNew = () => {
     processorRef.current?.cancel();
@@ -977,6 +1339,10 @@ export function CortadorTool() {
     setSelectedPartId(null);
     setBusy(null);
     setPreviewing(false);
+    zonePreviewSnapshotRef.current = null;
+    zonePreviewOpsRef.current = null;
+    setZonePreviewPending(false);
+    setZonePreviewValid(false);
     setZone(null);
     setPickMode(false);
     setPlacing(null);
@@ -1077,9 +1443,7 @@ export function CortadorTool() {
   const outward = model?.diagnostics.outward ?? false;
   const canCut = Boolean(model) && watertight && outward && !busy;
   const activeCuts = ops.filter((op) => op.enabled).length;
-  const planeOps = ops.filter(
-    (op): op is PlaneCutOp => op.kind === "plane"
-  );
+  const planeOps = ops.filter((op): op is PlaneCutOp => op.kind === "plane");
   const activePlane = planeOps.find((op) => op.id === activeCutId) ?? null;
   const activeTilt = activePlane
     ? Math.round(
@@ -1087,11 +1451,13 @@ export function CortadorTool() {
           Math.min(
             1,
             Math.max(
-              ...(activePlane.normal ?? [
-                activePlane.axis === "x" ? 1 : 0,
-                activePlane.axis === "y" ? 1 : 0,
-                activePlane.axis === "z" ? 1 : 0,
-              ]).map((value) => Math.abs(value))
+              ...(
+                activePlane.normal ?? [
+                  activePlane.axis === "x" ? 1 : 0,
+                  activePlane.axis === "y" ? 1 : 0,
+                  activePlane.axis === "z" ? 1 : 0,
+                ]
+              ).map((value) => Math.abs(value))
             )
           )
         ) *
@@ -1099,14 +1465,11 @@ export function CortadorTool() {
           Math.PI
       )
     : 0;
-  const curveOps = ops.filter(
-    (op): op is CurveCutOp => op.kind === "curve"
-  );
-  const shapeOps = ops.filter(
-    (op): op is ShapeCutOp => op.kind === "shape"
-  );
-  const regionOps = ops.filter(
-    (op): op is RegionCutOp => op.kind === "region"
+  const curveOps = ops.filter((op): op is CurveCutOp => op.kind === "curve");
+  const shapeOps = ops.filter((op): op is ShapeCutOp => op.kind === "shape");
+  const regionOps = ops.filter((op): op is RegionCutOp => op.kind === "region");
+  const surfaceOps = ops.filter(
+    (op): op is SurfaceCutOp => op.kind === "surface"
   );
   const totalVolume = parts.reduce((sum, part) => sum + part.volume, 0);
   const zoneHasColors = Boolean(model?.faceColors) && parts.length === 1;
@@ -1196,7 +1559,9 @@ export function CortadorTool() {
             variant="outline"
             aria-label="Deshacer"
             data-testid="undo"
-            disabled={history.length === 0 || Boolean(busy)}
+            disabled={
+              history.length === 0 || Boolean(busy) || zonePreviewPending
+            }
             onClick={undo}
           >
             <Undo2 className="size-4" />
@@ -1206,7 +1571,7 @@ export function CortadorTool() {
             variant="outline"
             aria-label="Rehacer"
             data-testid="redo"
-            disabled={future.length === 0 || Boolean(busy)}
+            disabled={future.length === 0 || Boolean(busy) || zonePreviewPending}
             onClick={redo}
           >
             <Redo2 className="size-4" />
@@ -1295,7 +1660,9 @@ export function CortadorTool() {
                 }
                 className="h-[58vh] min-h-[440px] w-full"
               />
-              {!busy && (activePlane || (dirty && activeCuts > 0)) ? (
+              {!busy &&
+              !zonePreviewPending &&
+              (activePlane || (dirty && activeCuts > 0)) ? (
                 <div className="absolute right-3 bottom-3 z-10 flex items-center gap-2 rounded-lg border bg-background/95 p-2 shadow-lg backdrop-blur">
                   {activePlane ? (
                     <div className="px-1">
@@ -1527,15 +1894,291 @@ export function CortadorTool() {
           <aside className="min-w-0 space-y-3 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:pr-2">
             <PanelSection
               icon={FileBox}
-              title="Modelo"
+              title="1 · Preparar modelo"
+              summary={watertight && outward ? "Listo para cortar" : "Revisar malla"}
+            >
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant={watertight ? "secondary" : "destructive"}>
+                  {watertight ? "Cerrada" : "Abierta"}
+                </Badge>
+                <Badge variant={outward ? "secondary" : "destructive"}>
+                  {outward ? "Orientación válida" : "Normales invertidas"}
+                </Badge>
+                <Badge variant="outline">
+                  {formatNumber(model.diagnostics.triangles, 0)} triángulos
+                </Badge>
+              </div>
+              {!watertight || !outward ? (
+                <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                  <p className="text-xs font-medium">Reparar antes de cortar</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Los cortes sólidos necesitan una malla cerrada y orientada.
+                    Repará el modelo; si sigue abierto, el panel de diagnóstico
+                    indica qué revisar.
+                  </p>
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    onClick={handleRepair}
+                    disabled={repairing || Boolean(busy)}
+                  >
+                    {repairing ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Wrench className="size-4" />
+                    )}
+                    {repairing ? "Reparando…" : "Reparar malla"}
+                  </Button>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  El modelo está listo. Podés cortarlo por un plano o extraer
+                  una zona con la varita.
+                </p>
+              )}
+            </PanelSection>
+
+            <PanelSection
+              icon={Scissors}
+              title="2 · Separar piezas"
+              summary={
+                zone
+                  ? `${zone.zone.triangles} caras seleccionadas`
+                  : `${activeCuts} cortes`
+              }
+            >
+              <div className="space-y-2 rounded-lg border border-primary/20 bg-primary/5 p-3">
+                <div>
+                  <p className="text-sm font-medium">Corte básico · sin selección</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Divide la pieza por el centro. Elegí un eje y después
+                    confirmá el corte en la vista 3D.
+                  </p>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(["x", "y", "z"] as CutAxis[]).map((axis) => (
+                    <Button
+                      key={axis}
+                      size="sm"
+                      variant="outline"
+                      data-testid={`quick-cut-${axis}`}
+                      onClick={() => addPlane(axis)}
+                      disabled={!canCut || zonePreviewPending}
+                    >
+                      <Scissors className="size-3.5" />
+                      {AXIS_LABEL[axis]}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-lg border p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <GroupLabel>O extraé una zona de la superficie</GroupLabel>
+                  {zone ? (
+                    <Badge variant="secondary">
+                      {zone.zone.triangles} caras
+                    </Badge>
+                  ) : null}
+                </div>
+                <Button
+                  size="sm"
+                  variant={pickMode ? "default" : "outline"}
+                  className="w-full"
+                  onClick={() => {
+                    setPickMode((value) => !value);
+                    if (!pickMode) {
+                      setZoneOptions((current) => ({
+                        ...current,
+                        contiguous: true,
+                      }));
+                    }
+                    setPlacing(null);
+                  }}
+                  disabled={!canCut || zonePreviewPending}
+                >
+                  <Wand2 className="size-4" />
+                  {pickMode ? "Pintá sobre el modelo" : "Activar varita"}
+                </Button>
+                {pickMode ? (
+                  <>
+                    <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                      Tolerancia
+                      <Slider
+                        aria-label="Tolerancia de selección"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={[zoneOptions.tolerance]}
+                        onValueChange={([value]) =>
+                          setZoneOptions((current) => ({
+                            ...current,
+                            tolerance: value,
+                          }))
+                        }
+                        className="flex-1"
+                      />
+                      <span className="w-8 text-right tabular-nums">
+                        {zoneOptions.tolerance}
+                      </span>
+                    </label>
+                    <Hint>
+                      Arrastrá para pintar; Shift suma y Alt resta caras.
+                    </Hint>
+                  </>
+                ) : null}
+
+              {zone ? (
+                <div className="space-y-2 rounded-lg border bg-muted/30 p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium">
+                      Zona: {zone.zone.triangles} caras ·{" "}
+                      {formatNumber(zone.zone.area, 0)} mm²
+                    </span>
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      aria-label="Quitar selección"
+                      onClick={() => setZone(null)}
+                    >
+                      <X className="size-3.5" />
+                    </Button>
+                  </div>
+                  <label className="flex items-center justify-between gap-2 text-xs">
+                    Cómo separar
+                    <select
+                      aria-label="Cómo separar la zona seleccionada"
+                      className="h-9 rounded-md border bg-background px-2 text-xs text-foreground"
+                      value={zoneCutMode}
+                      onChange={(event) =>
+                        setZoneCutMode(event.target.value as SurfaceCutMode)
+                      }
+                    >
+                      <option value="piece">Pieza completa por contorno</option>
+                      <option value="shell">Cáscara superficial</option>
+                    </select>
+                  </label>
+                  {zoneCutMode === "shell" ? (
+                    <JointSlider
+                      label="Profundidad de cáscara"
+                      value={zoneDepth}
+                      min={0.5}
+                      max={Math.max(2, Math.min(...model.bounds.size) * 0.5)}
+                      step={0.5}
+                      onChange={setZoneDepth}
+                    />
+                  ) : (
+                    <>
+                      <label className="flex items-center justify-between gap-2 text-xs">
+                        Tapa del corte
+                        <select
+                          aria-label="Forma de la tapa del corte"
+                          className="h-9 rounded-md border bg-background px-2 text-xs text-foreground"
+                          value={zoneCapMode}
+                          onChange={(event) =>
+                            setZoneCapMode(
+                              event.target.value as SurfaceCapMode
+                            )
+                          }
+                        >
+                          <option value="planar">Recta y plana</option>
+                          <option value="follow">Seguir forma 3D</option>
+                        </select>
+                      </label>
+                      <p className="text-[11px] text-muted-foreground">
+                        {zoneCapMode === "planar"
+                          ? "Corte plano por el borde; se conserva el lado de la selección."
+                          : "Se cierra siguiendo el relieve 3D de la selección."}
+                      </p>
+                    </>
+                  )}
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    data-testid="separate-zone"
+                    onClick={handleZoneCut}
+                    disabled={!canCut || zonePreviewPending}
+                  >
+                    <Scissors className="size-4" />
+                    {zoneCutMode === "piece"
+                      ? "Separar pieza por contorno"
+                      : "Separar cáscara seleccionada"}
+                  </Button>
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">
+                  Pintá una zona o elegí un corte recto. El corte recto no
+                  requiere selección.
+                </p>
+              )}
+              </div>
+
+              {zonePreviewPending ? (
+                <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-2.5">
+                  <p className="text-xs font-medium">Revisar separación</p>
+                  {error ? (
+                    <p className="text-xs text-destructive">{error}</p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {zonePreviewValid
+                        ? "La geometría está lista para confirmar."
+                        : "Calculando una vista válida…"}
+                    </p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      data-testid="cancel-zone-preview"
+                      onClick={cancelZonePreview}
+                    >
+                      Cancelar
+                    </Button>
+                    <Button
+                      size="sm"
+                      data-testid="confirm-zone-preview"
+                      onClick={confirmZonePreview}
+                      disabled={!zonePreviewValid || Boolean(busy)}
+                    >
+                      Confirmar
+                    </Button>
+                  </div>
+                </div>
+              ) : dirty && activeCuts > 0 ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runCuts(ops, model, true)}
+                    disabled={!canCut}
+                  >
+                    <Eye className="size-4" />
+                    Vista previa
+                  </Button>
+                  <Button size="sm" onClick={applyCuts} disabled={!canCut}>
+                    <Scissors className="size-4" />
+                    Aplicar corte
+                  </Button>
+                </div>
+              ) : null}
+            </PanelSection>
+
+            <SurfaceJointSettings
+              surfaceOps={surfaceOps}
+              modelSize={model.bounds.size}
+              onUpdate={updateSurfaceCut}
+            />
+
+            <PanelSection
+              icon={FileBox}
+              title="Diagnóstico del modelo"
               summary={`${formatNumber(model.diagnostics.triangles, 0)} tri`}
+              defaultOpen={!watertight || !outward}
             >
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div className="rounded-lg bg-muted/60 px-2.5 py-2">
                   <p className="text-muted-foreground">Formato</p>
-                  <p className="mt-0.5 font-medium uppercase">
-                    {model.format}
-                  </p>
+                  <p className="mt-0.5 font-medium uppercase">{model.format}</p>
                 </div>
                 <div className="rounded-lg bg-muted/60 px-2.5 py-2">
                   <p className="text-muted-foreground">Peso</p>
@@ -1577,8 +2220,8 @@ export function CortadorTool() {
                 ) : null}
                 {model.diagnostics.nonManifoldEdges > 0 ? (
                   <Badge variant="outline">
-                    {formatNumber(model.diagnostics.nonManifoldEdges, 0)} aristas
-                    no manifold
+                    {formatNumber(model.diagnostics.nonManifoldEdges, 0)}{" "}
+                    aristas no manifold
                   </Badge>
                 ) : null}
                 {model.hasColors ? (
@@ -1595,34 +2238,6 @@ export function CortadorTool() {
                   {warning}
                 </p>
               ))}
-
-              {!watertight || !outward ? (
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5">
-                  <p className="text-xs font-medium">
-                    Repará la malla antes de cortar
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    Se sueldan vértices, se orientan las caras y se cierran los
-                    agujeros. El reporte queda visible y la exportación se
-                    bloquea si no queda cerrada.
-                  </p>
-                </div>
-              ) : null}
-
-              <Button
-                variant={watertight && outward ? "outline" : "default"}
-                size="sm"
-                className="w-full"
-                onClick={handleRepair}
-                disabled={repairing || Boolean(busy)}
-              >
-                {repairing ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Wrench className="size-4" />
-                )}
-                {repairing ? "Reparando…" : "Reparar malla"}
-              </Button>
 
               {repairSteps.filter((step) => step.changed).length > 0 ? (
                 <div className="space-y-1">
@@ -1647,7 +2262,7 @@ export function CortadorTool() {
 
             <PanelSection
               icon={Wand2}
-              title="Zonas"
+              title="Herramientas automáticas y filtros"
               summary={
                 zone
                   ? `${zone.zone.triangles} caras`
@@ -1655,6 +2270,7 @@ export function CortadorTool() {
                     ? "Pintá una zona"
                     : "Varita 3D"
               }
+              defaultOpen={false}
             >
               <Button
                 size="sm"
@@ -1685,29 +2301,6 @@ export function CortadorTool() {
                 Separa las cáscaras independientes del modelo en piezas, sin
                 medir ni cortar. Si es una sola cáscara unida, usá «Separar
                 formas automáticamente».
-              </Hint>
-              <Button
-                size="sm"
-                variant={pickMode ? "default" : "outline"}
-                className="w-full"
-                onClick={() => {
-                  setPickMode((value) => !value);
-                  if (!pickMode) {
-                    setZoneOptions((current) => ({
-                      ...current,
-                      contiguous: true,
-                    }));
-                  }
-                  setPlacing(null);
-                }}
-                disabled={!canCut}
-              >
-                <Wand2 className="size-4" />
-                {pickMode ? "Pintá la zona en el visor" : "Activar varita"}
-              </Button>
-              <Hint>
-                Zona conectada crece por la superficie y se detiene en bordes
-                marcados. Caras sueltas busca parches con orientación parecida.
               </Hint>
               <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
                 Tolerancia
@@ -1755,99 +2348,39 @@ export function CortadorTool() {
                 >
                   Ángulo
                 </Button>
-                  <Button
-                    size="xs"
-                    variant={zoneOptions.contiguous ? "secondary" : "outline"}
-                    onClick={() =>
-                      setZoneOptions((current) => ({
-                        ...current,
-                        contiguous: !current.contiguous,
-                      }))
-                    }
-                  >
-                    {zoneOptions.contiguous ? "Conectada" : "Sueltas"}
-                  </Button>
-                </div>
-                {!zoneOptions.contiguous ? (
-                  <p className="text-[11px] text-muted-foreground">
-                    Caras sueltas selecciona parches parecidos aunque no estén
-                    unidos. Para un bulto entero usá Zona conectada.
-                  </p>
-                ) : null}
-                {zoneOptions.useColor && !zoneHasColors ? (
+                <Button
+                  size="xs"
+                  variant={zoneOptions.contiguous ? "secondary" : "outline"}
+                  onClick={() =>
+                    setZoneOptions((current) => ({
+                      ...current,
+                      contiguous: !current.contiguous,
+                    }))
+                  }
+                >
+                  {zoneOptions.contiguous ? "Conectada" : "Sueltas"}
+                </Button>
+              </div>
+              {!zoneOptions.contiguous ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Caras sueltas selecciona parches parecidos aunque no estén
+                  unidos. Para un bulto entero usá Zona conectada.
+                </p>
+              ) : null}
+              {zoneOptions.useColor && !zoneHasColors ? (
                 <p className="text-[11px] text-muted-foreground">
                   La varita por color está disponible en un 3MF con colores y
                   antes de cortar. Ahora usa ángulos.
                 </p>
               ) : null}
 
-              {zone ? (
-                <div className="space-y-2 rounded-lg border bg-muted/30 p-2.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium">
-                      {zone.zone.triangles} caras ·{" "}
-                      {formatNumber(zone.zone.area, 0)} mm²
-                    </span>
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label="Quitar selección"
-                      onClick={() => setZone(null)}
-                    >
-                      <X className="size-3.5" />
-                    </Button>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Eje {AXIS_LABEL[zone.zone.axis]} · borde{" "}
-                    {zone.zone.boundaryLoops.length} ·{" "}
-                    {zone.zone.color ?? "sin color"}
-                  </p>
-                  <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                    Profundidad
-                    <Slider
-                      aria-label="Profundidad de la zona"
-                      min={0.5}
-                      max={Math.max(
-                        2,
-                        Math.min(...model.bounds.size) * 0.5
-                      )}
-                      step={0.5}
-                      value={[zoneDepth]}
-                      onValueChange={([value]) => setZoneDepth(value)}
-                      className="flex-1"
-                    />
-                    <span className="w-12 text-right tabular-nums">
-                      {formatNumber(zoneDepth, 1)} mm
-                    </span>
-                  </label>
-                  <Button
-                    size="sm"
-                    className="w-full"
-                    data-testid="separate-zone"
-                    onClick={handleZoneCut}
-                    disabled={!canCut}
-                  >
-                    <Scissors className="size-4" />
-                    Separar zona
-                  </Button>
-                  <Hint>
-                    La zona se corta con una tapa de esa profundidad. Seguí
-                    pintando para ampliarla, usá Shift para sumar y Alt para
-                    restar caras.
-                  </Hint>
-                </div>
-              ) : (
-                <p className="rounded-lg border border-dashed px-3 py-3 text-center text-[11px] text-muted-foreground">
-                  Activá la varita y arrastrá sobre el modelo para pintar la
-                  zona.
-                </p>
-              )}
             </PanelSection>
 
             <PanelSection
               icon={Scissors}
-              title="Cortes"
+              title="Cortes avanzados"
               summary={`${activeCuts} activo${activeCuts === 1 ? "" : "s"}`}
+              defaultOpen={false}
             >
               {ops.length > 0 ? (
                 <div className="space-y-1.5">
@@ -2054,11 +2587,12 @@ export function CortadorTool() {
                                 updatePlane(plane.id, {
                                   joint: joint
                                     ? undefined
-                                    : {
-                                        diameter: 5,
-                                        length: 6,
-                                        clearance: 0.2,
-                                      },
+                                      : {
+                                          diameter: 5,
+                                          length: 6,
+                                          clearance: 0.2,
+                                          variant: "dowel",
+                                        },
                                 })
                               }
                             >
@@ -2080,7 +2614,11 @@ export function CortadorTool() {
                                 }
                               />
                               <JointSlider
-                                label="Largo"
+                                label={
+                                  joint.variant === "magnet"
+                                    ? "Profundidad"
+                                    : "Largo"
+                                }
                                 value={joint.length}
                                 min={2}
                                 max={12}
@@ -2091,7 +2629,7 @@ export function CortadorTool() {
                                   })
                                 }
                               />
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 <span className="w-16 text-[11px] text-muted-foreground">
                                   Forma
                                 </span>
@@ -2140,10 +2678,40 @@ export function CortadorTool() {
                                 >
                                   Milano
                                 </Button>
+                                <Button
+                                  size="xs"
+                                  variant={
+                                    joint.variant === "magnet"
+                                      ? "default"
+                                      : "outline"
+                                  }
+                                  onClick={() =>
+                                    updatePlane(plane.id, {
+                                      joint: {
+                                        ...joint,
+                                        diameter:
+                                          joint.variant === "magnet"
+                                            ? joint.diameter
+                                            : 6,
+                                        length:
+                                          joint.variant === "magnet"
+                                            ? joint.length
+                                            : 3,
+                                        variant: "magnet",
+                                      },
+                                    })
+                                  }
+                                >
+                                  Imán
+                                </Button>
                               </div>
                               <JointSlider
                                 label={
-                                  joint.count === 2 ? "Doble tetón" : "Cantidad"
+                                  joint.variant === "magnet"
+                                    ? "Cantidad de imanes"
+                                    : joint.count === 2
+                                      ? "Doble tetón"
+                                      : "Cantidad"
                                 }
                                 value={joint.count ?? 1}
                                 min={1}
@@ -2158,7 +2726,11 @@ export function CortadorTool() {
                                 }
                               />
                               <JointSlider
-                                label="Holgura"
+                                label={
+                                  joint.variant === "magnet"
+                                    ? "Holgura radial"
+                                    : "Holgura"
+                                }
                                 value={joint.clearance}
                                 min={0.05}
                                 max={0.4}
@@ -2170,14 +2742,16 @@ export function CortadorTool() {
                                 }
                               />
                               <p className="text-[10px] text-muted-foreground">
-                                {joint.count === 2
+                                {joint.variant === "magnet"
+                                  ? "Crea bolsillos enfrentados; coloca los imanes después de imprimir."
+                                  : joint.count === 2
                                   ? "Doble tetón: "
                                   : `${joint.count ?? 1} tetón${
                                       (joint.count ?? 1) === 1 ? "" : "es"
                                     }: `}
-                                espiga en una pieza y alojamiento en la otra.
-                                Holgura recomendada: 0.15 mm con boquilla de 0.4
-                                mm.
+                                {joint.variant === "magnet"
+                                  ? ""
+                                  : "espiga en una pieza y alojamiento en la otra. Holgura recomendada: 0.15 mm con boquilla de 0.4 mm."}
                               </p>
                             </div>
                           ) : (
@@ -2436,7 +3010,8 @@ export function CortadorTool() {
                     </div>
                     {placing?.id === shape.id ? (
                       <p className="text-[11px] text-sky-700 dark:text-sky-400">
-                        Hacé clic en la pieza para centrar la forma en ese punto.
+                        Hacé clic en la pieza para centrar la forma en ese
+                        punto.
                       </p>
                     ) : null}
                     <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -2545,7 +3120,9 @@ export function CortadorTool() {
                           size="icon-xs"
                           variant="ghost"
                           aria-label={
-                            region.enabled ? "Desactivar corte" : "Activar corte"
+                            region.enabled
+                              ? "Desactivar corte"
+                              : "Activar corte"
                           }
                           onClick={() => {
                             setOps((current) =>
@@ -2605,23 +3182,23 @@ export function CortadorTool() {
                 ) : (
                   <span />
                 )}
-              <Button
-                size="sm"
-                variant="secondary"
-                className="w-full"
-                data-testid="suggest-cuts"
-                onClick={handleSuggest}
-                disabled={!canCut}
-              >
-                <Sparkles className="size-3.5" />
-                Sugerir cortes por forma
-              </Button>
-              <Hint>
-                Analiza la sección de la pieza en los tres ejes y propone planos
-                en los estrechamientos naturales.
-              </Hint>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="w-full"
+                  data-testid="suggest-cuts"
+                  onClick={handleSuggest}
+                  disabled={!canCut}
+                >
+                  <Sparkles className="size-3.5" />
+                  Sugerir cortes por forma
+                </Button>
+                <Hint>
+                  Analiza la sección de la pieza en los tres ejes y propone
+                  planos en los estrechamientos naturales.
+                </Hint>
 
-              {ops.length > 0 ? (
+                {ops.length > 0 ? (
                   <Button size="sm" variant="ghost" onClick={clearCuts}>
                     <X className="size-3.5" />
                     Quitar todos
@@ -2633,7 +3210,7 @@ export function CortadorTool() {
                 className="w-full"
                 data-testid="apply-cuts"
                 onClick={applyCuts}
-                disabled={!canCut || ops.length === 0}
+                disabled={!canCut || ops.length === 0 || zonePreviewPending}
               >
                 <Scissors className="size-4" />
                 {dirty ? "Aplicar cortes" : "Recalcular piezas"}
@@ -2690,7 +3267,7 @@ export function CortadorTool() {
                   size="sm"
                   variant="outline"
                   onClick={handleDownloadReport}
-                  disabled={parts.length === 0}
+                  disabled={!exportable}
                 >
                   <FileText className="size-3.5" />
                   Informe
