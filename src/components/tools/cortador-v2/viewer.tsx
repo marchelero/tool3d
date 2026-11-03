@@ -2,7 +2,7 @@
 
 /* eslint-disable react-hooks/immutability -- los buffers de three.js se escriben en el lugar. */
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Box3,
   BufferAttribute,
@@ -29,6 +29,7 @@ import {
   Vector2,
   Vector3,
   WebGLRenderer,
+  WireframeGeometry,
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
@@ -65,6 +66,7 @@ const PROBLEM = new Color("#ef4444");
 interface Entry {
   mesh: Mesh<BufferGeometry, MeshStandardMaterial>;
   geometry: BufferGeometry;
+  edges: LineSegments | null;
   colors: Float32Array;
   indices: Uint32Array;
   count: number;
@@ -72,6 +74,19 @@ interface Entry {
   painted: Uint8Array;
   signature: string;
 }
+
+type ViewPreset = "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+type ViewOptions = { transparency: boolean; edges: boolean; interior: boolean; plate: boolean };
+
+const VIEW_PRESETS: Array<{ id: ViewPreset; label: string; title: string }> = [
+  { id: "iso", label: "Iso", title: "Vista isométrica" },
+  { id: "front", label: "Fr", title: "Frente" },
+  { id: "back", label: "At", title: "Atrás" },
+  { id: "left", label: "Iz", title: "Izquierda" },
+  { id: "right", label: "De", title: "Derecha" },
+  { id: "top", label: "Ar", title: "Arriba" },
+  { id: "bottom", label: "Ab", title: "Abajo" },
+];
 
 interface Props {
   pieces: ViewerPiece[];
@@ -125,6 +140,12 @@ function barycentric(
 
 export function Cutter2Viewer(props: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [viewOptions, setViewOptions] = useState<ViewOptions>({
+    transparency: false,
+    edges: false,
+    interior: false,
+    plate: true,
+  });
   const stateRef = useRef<{
     renderer: WebGLRenderer;
     scene: Scene;
@@ -273,6 +294,8 @@ export function Cutter2Viewer(props: Props) {
       controls.dispose();
       for (const entry of state.entries.values()) {
         entry.geometry.dispose();
+        entry.edges?.geometry.dispose();
+        if (entry.edges) (entry.edges.material as LineBasicMaterial).dispose();
         entry.mesh.material.dispose();
       }
       state.entries.clear();
@@ -299,6 +322,8 @@ export function Cutter2Viewer(props: Props) {
       if (wanted.has(id)) continue;
       state.group.remove(entry.mesh);
       entry.geometry.dispose();
+      entry.edges?.geometry.dispose();
+      if (entry.edges) (entry.edges.material as LineBasicMaterial).dispose();
       entry.mesh.material.dispose();
       state.entries.delete(id);
       structural = true;
@@ -311,6 +336,8 @@ export function Cutter2Viewer(props: Props) {
         if (entry) {
           state.group.remove(entry.mesh);
           entry.geometry.dispose();
+          entry.edges?.geometry.dispose();
+          if (entry.edges) (entry.edges.material as LineBasicMaterial).dispose();
           entry.mesh.material.dispose();
         }
         const count = piece.indices.length / 3;
@@ -343,7 +370,7 @@ export function Cutter2Viewer(props: Props) {
         const mesh = new Mesh(geometry, material);
         mesh.userData.pieceId = piece.id;
         state.group.add(mesh);
-        entry = { mesh, geometry, colors, indices: piece.indices, count, base, painted: new Uint8Array(count).fill(9), signature };
+        entry = { mesh, geometry, edges: null, colors, indices: piece.indices, count, base, painted: new Uint8Array(count).fill(9), signature };
         state.entries.set(piece.id, entry);
         geometry.setAttribute("color", new BufferAttribute(colors, 3));
         structural = true;
@@ -384,7 +411,7 @@ export function Cutter2Viewer(props: Props) {
       state.rings.visible = false;
       return;
     }
-    state.grid.visible = true;
+    state.grid.visible = viewOptions.plate;
     const size = new Vector3();
     box.getSize(size);
     const center = new Vector3();
@@ -395,7 +422,40 @@ export function Cutter2Viewer(props: Props) {
     state.rings.visible = !!props.showRings;
     state.rings.position.copy(center);
     state.rings.scale.setScalar(extent * 0.62);
-  }, [props.pieces, props.showRings]);
+  }, [props.pieces, props.showRings, viewOptions.plate]);
+
+  // -------------------------------------------------------- toolbar options
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!state) return;
+    const piecesById = new Map(props.pieces.map((piece) => [piece.id, piece]));
+    for (const [id, entry] of state.entries) {
+      const piece = piecesById.get(id);
+      if (!piece) continue;
+      const material = entry.mesh.material;
+      const factor = viewOptions.interior ? 0.28 : viewOptions.transparency ? 0.38 : 1;
+      material.opacity = (piece.opacity ?? 1) * factor;
+      material.transparent = material.opacity < 1;
+      material.depthWrite = !material.transparent;
+      material.needsUpdate = true;
+
+      if (viewOptions.edges && !entry.edges) {
+        const geometry = new WireframeGeometry(entry.geometry);
+        const edges = new LineSegments(
+          geometry,
+          new LineBasicMaterial({ color: 0x0c0f12, transparent: true, opacity: 0.4, depthWrite: false })
+        );
+        edges.renderOrder = 2;
+        entry.edges = edges;
+        entry.mesh.add(edges);
+      } else if (!viewOptions.edges && entry.edges) {
+        entry.mesh.remove(entry.edges);
+        entry.edges.geometry.dispose();
+        (entry.edges.material as LineBasicMaterial).dispose();
+        entry.edges = null;
+      }
+    }
+  }, [props.pieces, viewOptions]);
 
   // ------------------------------------------------------------------ colors
   useEffect(() => {
@@ -756,7 +816,102 @@ export function Cutter2Viewer(props: Props) {
     };
   }, []);
 
+  const frameView = useCallback((preset?: ViewPreset) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const box = new Box3();
+    for (const entry of state.entries.values()) {
+      entry.geometry.computeBoundingBox();
+      if (!entry.geometry.boundingBox) continue;
+      box.union(entry.geometry.boundingBox.clone().translate(entry.mesh.position));
+    }
+    if (box.isEmpty()) return;
+
+    const center = box.getCenter(new Vector3());
+    const size = box.getSize(new Vector3()).length() || 1;
+    const distance = Math.max((size / 2 / Math.tan((state.camera.fov * Math.PI) / 360)) * 1.12, 2);
+    const presetAngles: Record<ViewPreset, [number, number]> = {
+      iso: [-68, 20],
+      front: [-90, 0],
+      back: [90, 0],
+      right: [0, 0],
+      left: [180, 0],
+      top: [-90, 89.9],
+      bottom: [-90, -89.9],
+    };
+    const [yawDegrees, pitchDegrees] = preset ? presetAngles[preset] : [
+      Math.atan2(state.camera.position.y - state.controls.target.y, state.camera.position.x - state.controls.target.x) * 180 / Math.PI,
+      Math.asin((state.camera.position.z - state.controls.target.z) / state.camera.position.distanceTo(state.controls.target)) * 180 / Math.PI,
+    ];
+    const yaw = yawDegrees * Math.PI / 180;
+    const pitch = pitchDegrees * Math.PI / 180;
+    const horizontal = Math.cos(pitch) * distance;
+    state.controls.target.copy(center);
+    state.camera.position.set(
+      center.x + horizontal * Math.cos(yaw),
+      center.y + horizontal * Math.sin(yaw),
+      center.z + Math.sin(pitch) * distance
+    );
+    state.camera.up.set(0, 0, 1);
+    state.camera.lookAt(center);
+    state.camera.near = Math.max(0.05, distance / 500);
+    state.camera.far = distance * 40;
+    state.camera.updateProjectionMatrix();
+    state.controls.update();
+  }, []);
+
+  const toggleOption = (key: keyof ViewOptions) => {
+    setViewOptions((current) => ({ ...current, [key]: !current[key] }));
+  };
+
   const cursor = props.mode === "select" ? "crosshair" : props.mode === "perimeter" ? "grab" : props.mode === "orient" ? "pointer" : "grab";
 
-  return <div ref={hostRef} className="relative h-full w-full" style={{ cursor }} />;
+  return (
+    <div ref={hostRef} className="relative h-full w-full" style={{ cursor }}>
+      {props.pieces.length > 0 && (
+        <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex flex-wrap items-start justify-between gap-2">
+          <ViewerToolbar onPreset={frameView} options={viewOptions} onToggle={toggleOption} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ViewerToolbar({
+  onPreset,
+  options,
+  onToggle,
+}: {
+  onPreset: (preset?: ViewPreset) => void;
+  options: ViewOptions;
+  onToggle: (key: keyof ViewOptions) => void;
+}) {
+  const button = (label: string, title: string, action: () => void, pressed?: boolean) => (
+    <button
+      key={label}
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={pressed}
+      onClick={action}
+      className={`min-h-7 rounded border px-2 text-[10px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${pressed ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background/90 text-foreground hover:bg-accent"}`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <>
+      <div className="pointer-events-auto flex flex-wrap items-center gap-1 rounded-lg border border-border/80 bg-background/90 p-1 shadow-md backdrop-blur-sm" role="group" aria-label="Vistas del modelo">
+        {button("Centrar", "Centrar el modelo", () => onPreset())}
+        {VIEW_PRESETS.map((view) => button(view.label, view.title, () => onPreset(view.id)))}
+      </div>
+      <div className="pointer-events-auto flex flex-wrap items-center gap-1 rounded-lg border border-border/80 bg-background/90 p-1 shadow-md backdrop-blur-sm" role="group" aria-label="Visualización del modelo">
+        {button("Transp.", "Alternar transparencia", () => onToggle("transparency"), options.transparency)}
+        {button("Aristas", "Mostrar u ocultar aristas de la malla", () => onToggle("edges"), options.edges)}
+        {button("Interior", "Ver superficies interiores del corte", () => onToggle("interior"), options.interior)}
+        {button("Cama", "Mostrar u ocultar la cama de impresión", () => onToggle("plate"), options.plate)}
+      </div>
+    </>
+  );
 }

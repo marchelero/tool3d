@@ -13,5 +13,9 @@ Documento de continuidad: `docs/sessions/2026-10-30-cortador-v2.md`
   perímetro inválido) y la línea del perímetro que no se dibujaba.
 - Paridad añadida: editor de perímetros múltiples, Expandir/Contraer y defaults
   de sensibilidad, imán, suavizado y exportación alineados con el original.
+- La selección se mantiene al entrar al paso 3; separación visual manual sin
+  recálculo disponible en pasos 4–6; «Atrás» conserva visible el modelo cortado.
+- El visor ya incluye la barra superior del original: centrar, vistas Iso/Fr/At/
+  Iz/De/Ar/Ab y toggles de transparencia, aristas, interior y cama.
 - Un caso que genera más de un loop independiente requiere un modelo específico
   para verificación E2E adicional.
