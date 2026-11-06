@@ -1,3 +1,7 @@
+import { NULL_CONTEXT, type TaskContext } from '../core/TaskContext';
+
+const CHECKPOINT_INTERVAL = 512;
+
 /**
  * Flujo máximo / corte mínimo (Dinic) con capacidades reales. Se usa para
  * encontrar el lazo cerrado de costo mínimo que separa una región de su
@@ -28,16 +32,18 @@ export class MaxFlow {
     this.head[v] = this.to.length - 1;
   }
 
-  private bfs(s: number, t: number, eps: number): boolean {
+  private async bfs(s: number, t: number, eps: number, task: TaskContext): Promise<boolean> {
     const level = this.level;
     level.fill(-1);
     const q = new Int32Array(this.n);
     let qh = 0, qt = 0;
+    let scanned = 0;
     q[qt++] = s;
     level[s] = 0;
     while (qh < qt) {
       const u = q[qh++];
       for (let e = this.head[u]; e >= 0; e = this.next[e]) {
+        if (++scanned % CHECKPOINT_INTERVAL === 0) await task.checkpoint();
         const v = this.to[e];
         if (level[v] < 0 && this.cap[e] > eps) {
           level[v] = level[u] + 1;
@@ -49,12 +55,17 @@ export class MaxFlow {
   }
 
   /** Flujo máximo de s a t. */
-  solve(s: number, t: number, eps = 1e-12): number {
+  async solve(s: number, t: number, eps = 1e-12, task: TaskContext = NULL_CONTEXT): Promise<number> {
     let flow = 0;
+    let scanned = 0;
     const stackNode: number[] = [];
     const stackEdge: number[] = [];
-    while (this.bfs(s, t, eps)) {
-      for (let i = 0; i < this.n; i++) this.it[i] = this.head[i];
+    await task.checkpoint();
+    while (await this.bfs(s, t, eps, task)) {
+      for (let i = 0; i < this.n; i++) {
+        this.it[i] = this.head[i];
+        if (++scanned % CHECKPOINT_INTERVAL === 0) await task.checkpoint();
+      }
       // DFS iterativo
       for (;;) {
         stackNode.length = 0;
@@ -69,6 +80,7 @@ export class MaxFlow {
           }
           let advanced = false;
           for (; this.it[u] >= 0; this.it[u] = this.next[this.it[u]]) {
+            if (++scanned % CHECKPOINT_INTERVAL === 0) await task.checkpoint();
             const e = this.it[u];
             const v = this.to[e];
             if (this.cap[e] > eps && this.level[v] === this.level[u] + 1) {
@@ -96,6 +108,7 @@ export class MaxFlow {
           this.cap[e ^ 1] += push;
         }
         flow += push;
+        await task.checkpoint();
         if (!Number.isFinite(push)) break;
       }
     }
@@ -103,13 +116,15 @@ export class MaxFlow {
   }
 
   /** Nodos alcanzables desde s en el residual (lado S del corte mínimo). */
-  sourceSide(s: number, eps = 1e-12): Uint8Array {
+  async sourceSide(s: number, eps = 1e-12, task: TaskContext = NULL_CONTEXT): Promise<Uint8Array> {
     const mark = new Uint8Array(this.n);
     const stack = [s];
+    let scanned = 0;
     mark[s] = 1;
     while (stack.length) {
       const u = stack.pop()!;
       for (let e = this.head[u]; e >= 0; e = this.next[e]) {
+        if (++scanned % CHECKPOINT_INTERVAL === 0) await task.checkpoint();
         const v = this.to[e];
         if (!mark[v] && this.cap[e] > eps) {
           mark[v] = 1;

@@ -8,6 +8,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
+  CircleGeometry,
   DirectionalLight,
   DoubleSide,
   GridHelper,
@@ -19,6 +20,7 @@ import {
   LineLoop,
   LineSegments,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   PerspectiveCamera,
   Points,
@@ -33,7 +35,17 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
+import { Eye, Layers, Scan } from "lucide-react";
 import type { PerimeterView } from "@/lib/cutter2/worker/protocol";
+import { brushCursorPose } from "@/lib/cutter2/brush-cursor";
+import {
+  isPerimeterHandleVisibleInViewport,
+  nearestPerimeterHandle,
+  PERIMETER_HANDLE_MARKER,
+  type ScreenHandle,
+} from "@/lib/cutter2/perimeter-handle";
+import { createRenderScheduler, viewerPixelRatio } from "@/lib/cutter2/render-scheduler";
+import { StandardModelViewerToolbar, type ModelViewPreset } from "@/components/tools/shared/model-viewer-toolbar";
 
 BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -73,20 +85,11 @@ interface Entry {
   base: Color;
   painted: Uint8Array;
   signature: string;
+  sourcePositions: Float32Array;
+  sourceIndices: Uint32Array;
 }
 
-type ViewPreset = "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
 type ViewOptions = { transparency: boolean; edges: boolean; interior: boolean; plate: boolean };
-
-const VIEW_PRESETS: Array<{ id: ViewPreset; label: string; title: string }> = [
-  { id: "iso", label: "Iso", title: "Vista isométrica" },
-  { id: "front", label: "Fr", title: "Frente" },
-  { id: "back", label: "At", title: "Atrás" },
-  { id: "left", label: "Iz", title: "Izquierda" },
-  { id: "right", label: "De", title: "Derecha" },
-  { id: "top", label: "Ar", title: "Arriba" },
-  { id: "bottom", label: "Ab", title: "Abajo" },
-];
 
 interface Props {
   pieces: ViewerPiece[];
@@ -98,7 +101,10 @@ interface Props {
   seamLines: Float32Array[];
   mode: ViewerMode;
   fitKey: string;
+  expanded: boolean;
+  onToggleExpanded: () => void;
   paintEnabled?: boolean;
+  brushRadius?: number;
   highlightFace?: number | null;
   showRings?: boolean;
   onFaceClick?: (hit: FaceHit, mods: { ctrl: boolean; shift: boolean; alt: boolean }) => void;
@@ -140,6 +146,7 @@ function barycentric(
 
 export function Cutter2Viewer(props: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [wireframe, setWireframe] = useState(false);
   const [viewOptions, setViewOptions] = useState<ViewOptions>({
     transparency: false,
     edges: false,
@@ -155,13 +162,14 @@ export function Cutter2Viewer(props: Props) {
     lines: Group;
     grid: GridHelper;
     rings: Group;
+    brushCursor: Group;
     entries: Map<string, Entry>;
     raycaster: Raycaster;
     pointer: Vector2;
     drag: { loopIndex: number; index: number; handle: Vector3 | null } | null;
     ghost: Points | null;
     painting: boolean;
-    raf: number;
+    invalidate: () => void;
     disposed: boolean;
   } | null>(null);
   const propsRef = useRef(props);
@@ -173,7 +181,7 @@ export function Cutter2Viewer(props: Props) {
     const host = hostRef.current;
     if (!host) return;
     const renderer = new WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(viewerPixelRatio(window.devicePixelRatio));
     renderer.domElement.style.display = "block";
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
@@ -232,6 +240,35 @@ export function Cutter2Viewer(props: Props) {
     rings.visible = false;
     scene.add(rings);
 
+    const brushCursor = new Group();
+    const brushSurface = new Mesh(
+      new CircleGeometry(1, 48),
+      new MeshBasicMaterial({
+        color: "#f97316",
+        transparent: true,
+        opacity: 0.2,
+        depthWrite: false,
+        side: DoubleSide,
+      })
+    );
+    brushSurface.position.z = 0.001;
+    brushSurface.renderOrder = 20;
+    brushCursor.add(brushSurface);
+
+    const ringPoints = Array.from({ length: 48 }, (_, index) => {
+      const angle = (index / 48) * Math.PI * 2;
+      return new Vector3(Math.cos(angle), Math.sin(angle), 0);
+    });
+    const brushOutline = new LineLoop(
+      new BufferGeometry().setFromPoints(ringPoints),
+      new LineBasicMaterial({ color: "#c2410c", depthTest: false, depthWrite: false, transparent: true })
+    );
+    brushOutline.position.z = 0.002;
+    brushOutline.renderOrder = 21;
+    brushCursor.add(brushOutline);
+    brushCursor.visible = false;
+    scene.add(brushCursor);
+
     const group = new Group();
     const lines = new Group();
     scene.add(group, lines);
@@ -249,31 +286,20 @@ export function Cutter2Viewer(props: Props) {
       lines,
       grid,
       rings,
+      brushCursor,
       entries: new Map<string, Entry>(),
       raycaster,
       pointer,
       drag: null as { loopIndex: number; index: number; handle: Vector3 | null } | null,
       ghost: null as Points | null,
       painting: false,
-      raf: 0,
+      invalidate: () => {},
       disposed: false,
     };
     stateRef.current = state;
 
-    const resize = () => {
-      const width = host.clientWidth || 1;
-      const height = host.clientHeight || 1;
-      renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    resize();
-    const observer = new ResizeObserver(resize);
-    observer.observe(host);
-
     const render = () => {
       if (state.disposed) return;
-      state.raf = requestAnimationFrame(render);
       const handle = state.drag?.handle;
       if (state.ghost) {
         state.ghost.visible = !!handle;
@@ -285,12 +311,27 @@ export function Cutter2Viewer(props: Props) {
       controls.update();
       renderer.render(scene, camera);
     };
-    render();
+    const scheduler = createRenderScheduler(render);
+    state.invalidate = scheduler.invalidate;
+    controls.addEventListener("change", state.invalidate);
+
+    const resize = () => {
+      const width = host.clientWidth || 1;
+      const height = host.clientHeight || 1;
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      state.invalidate();
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(host);
 
     return () => {
       state.disposed = true;
-      cancelAnimationFrame(state.raf);
+      scheduler.dispose();
       observer.disconnect();
+      controls.removeEventListener("change", state.invalidate);
       controls.dispose();
       for (const entry of state.entries.values()) {
         entry.geometry.dispose();
@@ -306,6 +347,10 @@ export function Cutter2Viewer(props: Props) {
         (loop.material as LineBasicMaterial).dispose();
       });
       ringGeometry.dispose();
+      brushSurface.geometry.dispose();
+      (brushSurface.material as MeshBasicMaterial).dispose();
+      brushOutline.geometry.dispose();
+      (brushOutline.material as LineBasicMaterial).dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement === host) host.removeChild(renderer.domElement);
       stateRef.current = null;
@@ -331,7 +376,11 @@ export function Cutter2Viewer(props: Props) {
     for (const piece of props.pieces) {
       const signature = `${piece.color}|${piece.opacity ?? 1}`;
       let entry = state.entries.get(piece.id);
-      const changed = !entry || entry.count !== piece.indices.length / 3;
+      const changed =
+        !entry ||
+        entry.count !== piece.indices.length / 3 ||
+        entry.sourcePositions !== piece.positions ||
+        entry.sourceIndices !== piece.indices;
       if (!entry || changed) {
         if (entry) {
           state.group.remove(entry.mesh);
@@ -370,7 +419,19 @@ export function Cutter2Viewer(props: Props) {
         const mesh = new Mesh(geometry, material);
         mesh.userData.pieceId = piece.id;
         state.group.add(mesh);
-        entry = { mesh, geometry, edges: null, colors, indices: piece.indices, count, base, painted: new Uint8Array(count).fill(9), signature };
+        entry = {
+          mesh,
+          geometry,
+          edges: null,
+          colors,
+          indices: piece.indices,
+          count,
+          base,
+          painted: new Uint8Array(count).fill(9),
+          signature,
+          sourcePositions: piece.positions,
+          sourceIndices: piece.indices,
+        };
         state.entries.set(piece.id, entry);
         geometry.setAttribute("color", new BufferAttribute(colors, 3));
         structural = true;
@@ -389,6 +450,7 @@ export function Cutter2Viewer(props: Props) {
     if (structural) {
       for (const entry of state.entries.values()) entry.painted.fill(9);
     }
+    state.invalidate();
   }, [props.pieces]);
 
   // --------------------------------------------------------------- bed/rings
@@ -409,6 +471,7 @@ export function Cutter2Viewer(props: Props) {
     if (!any) {
       state.grid.visible = false;
       state.rings.visible = false;
+      state.invalidate();
       return;
     }
     state.grid.visible = viewOptions.plate;
@@ -422,6 +485,7 @@ export function Cutter2Viewer(props: Props) {
     state.rings.visible = !!props.showRings;
     state.rings.position.copy(center);
     state.rings.scale.setScalar(extent * 0.62);
+    state.invalidate();
   }, [props.pieces, props.showRings, viewOptions.plate]);
 
   // -------------------------------------------------------- toolbar options
@@ -433,6 +497,7 @@ export function Cutter2Viewer(props: Props) {
       const piece = piecesById.get(id);
       if (!piece) continue;
       const material = entry.mesh.material;
+      material.wireframe = wireframe;
       const factor = viewOptions.interior ? 0.28 : viewOptions.transparency ? 0.38 : 1;
       material.opacity = (piece.opacity ?? 1) * factor;
       material.transparent = material.opacity < 1;
@@ -455,7 +520,8 @@ export function Cutter2Viewer(props: Props) {
         entry.edges = null;
       }
     }
-  }, [props.pieces, viewOptions]);
+    state.invalidate();
+  }, [props.pieces, viewOptions, wireframe]);
 
   // ------------------------------------------------------------------ colors
   useEffect(() => {
@@ -463,6 +529,7 @@ export function Cutter2Viewer(props: Props) {
     if (!state) return;
     const { selection, hoverFaces, activePieceId } = props;
     const piecesById = new Map(props.pieces.map((p) => [p.id, p]));
+    let colorsChanged = false;
     for (const [id, entry] of state.entries) {
       const piece = piecesById.get(id);
       if (!piece) continue;
@@ -471,6 +538,7 @@ export function Cutter2Viewer(props: Props) {
       const hoverHere = id === activePieceId ? hoverFaces : null;
       const cap = piece.capMask;
       const colors = entry.colors;
+      let entryColorsChanged = false;
       for (let f = 0; f < width; f++) {
         let stateCode = 0;
         if (cap && cap[f] === 1) stateCode = 3;
@@ -478,6 +546,8 @@ export function Cutter2Viewer(props: Props) {
         else if (hoverHere && hoverHere[f] === 1) stateCode = 2;
         if (entry.painted[f] === stateCode) continue;
         entry.painted[f] = stateCode;
+        colorsChanged = true;
+        entryColorsChanged = true;
         const color = stateCode === 1 ? SELECTED : stateCode === 2 ? HOVERED : stateCode === 3 ? CAP : stateCode === 4 ? PROBLEM : entry.base;
         const at = f * 9;
         for (let k = 0; k < 3; k++) {
@@ -487,10 +557,23 @@ export function Cutter2Viewer(props: Props) {
         }
       }
       const attribute = entry.geometry.getAttribute("color") as BufferAttribute;
-      attribute.needsUpdate = true;
+      if (entryColorsChanged) attribute.needsUpdate = true;
     }
+    if (colorsChanged) state.invalidate();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.selection, props.hoverFaces, props.activePieceId, props.pieces]);
+
+  // ------------------------------------------------------------ brush cursor
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!state) return;
+    if (props.mode !== "select" || !props.paintEnabled) {
+      state.brushCursor.visible = false;
+    } else if (state.brushCursor.visible) {
+      state.brushCursor.scale.setScalar(Math.max(props.brushRadius ?? 0, 0.001));
+    }
+    state.invalidate();
+  }, [props.brushRadius, props.mode, props.paintEnabled]);
 
   // ------------------------------------------------- perimeter + seam lines
   useEffect(() => {
@@ -532,20 +615,30 @@ export function Cutter2Viewer(props: Props) {
       state.lines.add(line);
 
       const handles = perimeter.controlPositions.flatMap((p) => [p[0], p[1], p[2]]);
-      const handleGeometry = new BufferGeometry();
-      handleGeometry.setAttribute("position", new BufferAttribute(new Float32Array(handles), 3));
-      const points = new Points(
-        handleGeometry,
-        new PointsMaterial({ color: 0x0ea5e9, size: 2.4, sizeAttenuation: true, depthTest: false, transparent: true })
-      );
-      points.renderOrder = 13;
-      state.lines.add(points);
+      const makeHandlePoints = (color: number, size: number, renderOrder: number) => {
+        const geometry = new BufferGeometry();
+        geometry.setAttribute("position", new BufferAttribute(new Float32Array(handles), 3));
+        const points = new Points(
+          geometry,
+          new PointsMaterial({
+            color,
+            size,
+            sizeAttenuation: PERIMETER_HANDLE_MARKER.sizeAttenuation,
+            depthTest: false,
+            depthWrite: false,
+          })
+        );
+        points.renderOrder = renderOrder;
+        state.lines.add(points);
+      };
+      makeHandlePoints(0x0f172a, PERIMETER_HANDLE_MARKER.outlineSize, 13);
+      makeHandlePoints(0x38bdf8, PERIMETER_HANDLE_MARKER.fillSize, 14);
     }
     if (props.perimeters.length > 0) {
       const ghostGeometry = new BufferGeometry();
       ghostGeometry.setAttribute("position", new BufferAttribute(new Float32Array(3), 3));
-      const ghost = new Points(ghostGeometry, new PointsMaterial({ color: 0xffffff, size: 3.4, sizeAttenuation: true, depthTest: false }));
-      ghost.renderOrder = 14;
+      const ghost = new Points(ghostGeometry, new PointsMaterial({ color: 0x0f172a, size: PERIMETER_HANDLE_MARKER.outlineSize, sizeAttenuation: false, depthTest: false }));
+      ghost.renderOrder = 15;
       ghost.visible = false;
       state.ghost = ghost;
       state.lines.add(ghost);
@@ -565,6 +658,7 @@ export function Cutter2Viewer(props: Props) {
       path.renderOrder = 10;
       state.lines.add(path);
     }
+    state.invalidate();
   }, [props.perimeters, props.suggestedLines, props.seamLines]);
 
   // ------------------------------------------------------------- camera fit
@@ -572,17 +666,11 @@ export function Cutter2Viewer(props: Props) {
     const state = stateRef.current;
     if (!state || props.pieces.length === 0) return;
     const box = new Box3();
-    for (const piece of props.pieces) {
-      const geometry = new BufferGeometry();
-      geometry.setAttribute("position", new BufferAttribute(piece.positions, 3));
-      geometry.computeBoundingBox();
-      if (geometry.boundingBox) {
-        const bounds = geometry.boundingBox.clone();
-        const offset = piece.offset ?? [0, 0, 0];
-        bounds.translate(new Vector3(offset[0], offset[1], offset[2]));
-        box.union(bounds);
+    for (const entry of state.entries.values()) {
+      entry.geometry.computeBoundingBox();
+      if (entry.geometry.boundingBox) {
+        box.union(entry.geometry.boundingBox.clone().translate(entry.mesh.position));
       }
-      geometry.dispose();
     }
     if (box.isEmpty()) return;
     const sphere = box.getBoundingSphere(new Sphere());
@@ -596,6 +684,7 @@ export function Cutter2Viewer(props: Props) {
     camera.far = distance * 40;
     camera.updateProjectionMatrix();
     controls.update();
+    state.invalidate();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.fitKey]);
 
@@ -663,32 +752,52 @@ export function Cutter2Viewer(props: Props) {
       return { face: f, point: [point.x, point.y, point.z], bary, normal: [normal.x, normal.y, normal.z] };
     };
 
+    const updateBrushCursor = (hit: FaceHit | null) => {
+      const cursor = state.brushCursor;
+      const entry = activeEntry();
+      if (!hit || !entry || propsRef.current.mode !== "select" || !propsRef.current.paintEnabled) {
+        if (cursor.visible) {
+          cursor.visible = false;
+          state.invalidate();
+        }
+        return;
+      }
+
+      const pose = brushCursorPose(
+        hit.point,
+        hit.normal,
+        [entry.mesh.position.x, entry.mesh.position.y, entry.mesh.position.z],
+        propsRef.current.brushRadius ?? 0
+      );
+      cursor.position.set(...pose.position);
+      cursor.quaternion.setFromUnitVectors(new Vector3(0, 0, 1), new Vector3(...pose.normal));
+      cursor.scale.setScalar(Math.max(pose.radius, 0.001));
+      cursor.visible = true;
+      state.invalidate();
+    };
+
     const controlScreen = (loopIndex: number, index: number): { x: number; y: number } | null => {
       const perimeter = propsRef.current.perimeters[loopIndex];
       if (!perimeter) return null;
       const p = perimeter.controlPositions[index];
       if (!p) return null;
       const v = new Vector3(p[0], p[1], p[2]).project(state.camera);
+      if (!isPerimeterHandleVisibleInViewport(v)) return null;
       const rect = canvas.getBoundingClientRect();
       return { x: rect.left + ((v.x + 1) / 2) * rect.width, y: rect.top + ((1 - v.y) / 2) * rect.height };
     };
 
     const nearestHandle = (event: PointerEvent): { loopIndex: number; index: number } | null => {
-      let best: { loopIndex: number; index: number } | null = null;
-      let bestDist = 13;
+      const handles: ScreenHandle[] = [];
       for (let loopIndex = 0; loopIndex < propsRef.current.perimeters.length; loopIndex++) {
         const perimeter = propsRef.current.perimeters[loopIndex];
         for (let index = 0; index < perimeter.controlPositions.length; index++) {
           const screen = controlScreen(loopIndex, index);
           if (!screen) continue;
-          const dist = Math.hypot(screen.x - event.clientX, screen.y - event.clientY);
-          if (dist < bestDist) {
-            bestDist = dist;
-            best = { loopIndex, index };
-          }
+          handles.push({ loopIndex, index, ...screen });
         }
       }
-      return best;
+      return nearestPerimeterHandle(handles, event.clientX, event.clientY);
     };
 
     const nearestLoop = (hit: FaceHit): number => {
@@ -728,6 +837,7 @@ export function Cutter2Viewer(props: Props) {
         if (hit) {
           state.painting = true;
           state.controls.enabled = false;
+          updateBrushCursor(hit);
           propsRef.current.onPaintStart?.(hit);
           propsRef.current.onPaintDrag?.(hit);
           canvas.setPointerCapture(event.pointerId);
@@ -750,15 +860,18 @@ export function Cutter2Viewer(props: Props) {
           }
         }
         propsRef.current.onPerimeterMove?.(state.drag.loopIndex, state.drag.index, hit, false);
+        state.invalidate();
         return;
       }
       if (mode === "select" && state.painting) {
         const hit = hitActive(event);
+        updateBrushCursor(hit);
         if (hit) propsRef.current.onPaintDrag?.(hit);
         return;
       }
       if (mode === "select" || mode === "perimeter" || mode === "orient") {
         const hit = hitActive(event);
+        updateBrushCursor(mode === "select" ? hit : null);
         propsRef.current.onFaceHover?.(hit ? hit.face : null);
       }
     };
@@ -798,7 +911,10 @@ export function Cutter2Viewer(props: Props) {
       if (hit && propsRef.current.perimeters.length > 0) propsRef.current.onPerimeterInsert?.(nearestLoop(hit), hit);
     };
 
-    const onLeave = () => propsRef.current.onFaceHover?.(null);
+    const onLeave = () => {
+      updateBrushCursor(null);
+      propsRef.current.onFaceHover?.(null);
+    };
 
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
@@ -816,7 +932,7 @@ export function Cutter2Viewer(props: Props) {
     };
   }, []);
 
-  const frameView = useCallback((preset?: ViewPreset) => {
+  const frameView = useCallback((preset?: ModelViewPreset) => {
     const state = stateRef.current;
     if (!state) return;
     const box = new Box3();
@@ -830,7 +946,7 @@ export function Cutter2Viewer(props: Props) {
     const center = box.getCenter(new Vector3());
     const size = box.getSize(new Vector3()).length() || 1;
     const distance = Math.max((size / 2 / Math.tan((state.camera.fov * Math.PI) / 360)) * 1.12, 2);
-    const presetAngles: Record<ViewPreset, [number, number]> = {
+    const presetAngles: Record<ModelViewPreset, [number, number]> = {
       iso: [-68, 20],
       front: [-90, 0],
       back: [90, 0],
@@ -858,6 +974,16 @@ export function Cutter2Viewer(props: Props) {
     state.camera.far = distance * 40;
     state.camera.updateProjectionMatrix();
     state.controls.update();
+    state.invalidate();
+  }, []);
+
+  const zoomBy = useCallback((factor: number) => {
+    const state = stateRef.current;
+    if (!state) return;
+    const offset = state.camera.position.clone().sub(state.controls.target).multiplyScalar(factor);
+    state.camera.position.copy(state.controls.target).add(offset);
+    state.controls.update();
+    state.invalidate();
   }, []);
 
   const toggleOption = (key: keyof ViewOptions) => {
@@ -869,49 +995,42 @@ export function Cutter2Viewer(props: Props) {
   return (
     <div ref={hostRef} className="relative h-full w-full" style={{ cursor }}>
       {props.pieces.length > 0 && (
-        <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex flex-wrap items-start justify-between gap-2">
-          <ViewerToolbar onPreset={frameView} options={viewOptions} onToggle={toggleOption} />
-        </div>
+        <StandardModelViewerToolbar
+          expanded={props.expanded}
+          onToggleExpanded={props.onToggleExpanded}
+          onZoomIn={() => zoomBy(0.8)}
+          onZoomOut={() => zoomBy(1.25)}
+          onCenter={() => frameView()}
+          onViewPreset={frameView}
+          gridVisible={viewOptions.plate}
+          onToggleGrid={() => toggleOption("plate")}
+          wireframeVisible={wireframe}
+          onToggleWireframe={() => setWireframe((value) => !value)}
+          extraActions={[
+            {
+              id: "transparency",
+              label: viewOptions.transparency ? "Desactivar transparencia" : "Activar transparencia",
+              icon: <Eye className="size-4" />,
+              onClick: () => toggleOption("transparency"),
+              active: viewOptions.transparency,
+            },
+            {
+              id: "edges",
+              label: viewOptions.edges ? "Ocultar aristas" : "Mostrar aristas",
+              icon: <Scan className="size-4" />,
+              onClick: () => toggleOption("edges"),
+              active: viewOptions.edges,
+            },
+            {
+              id: "interior",
+              label: viewOptions.interior ? "Ocultar superficies interiores" : "Ver superficies interiores del corte",
+              icon: <Layers className="size-4" />,
+              onClick: () => toggleOption("interior"),
+              active: viewOptions.interior,
+            },
+          ]}
+        />
       )}
     </div>
-  );
-}
-
-function ViewerToolbar({
-  onPreset,
-  options,
-  onToggle,
-}: {
-  onPreset: (preset?: ViewPreset) => void;
-  options: ViewOptions;
-  onToggle: (key: keyof ViewOptions) => void;
-}) {
-  const button = (label: string, title: string, action: () => void, pressed?: boolean) => (
-    <button
-      key={label}
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={pressed}
-      onClick={action}
-      className={`min-h-7 rounded border px-2 text-[10px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${pressed ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background/90 text-foreground hover:bg-accent"}`}
-    >
-      {label}
-    </button>
-  );
-
-  return (
-    <>
-      <div className="pointer-events-auto flex flex-wrap items-center gap-1 rounded-lg border border-border/80 bg-background/90 p-1 shadow-md backdrop-blur-sm" role="group" aria-label="Vistas del modelo">
-        {button("Centrar", "Centrar el modelo", () => onPreset())}
-        {VIEW_PRESETS.map((view) => button(view.label, view.title, () => onPreset(view.id)))}
-      </div>
-      <div className="pointer-events-auto flex flex-wrap items-center gap-1 rounded-lg border border-border/80 bg-background/90 p-1 shadow-md backdrop-blur-sm" role="group" aria-label="Visualización del modelo">
-        {button("Transp.", "Alternar transparencia", () => onToggle("transparency"), options.transparency)}
-        {button("Aristas", "Mostrar u ocultar aristas de la malla", () => onToggle("edges"), options.edges)}
-        {button("Interior", "Ver superficies interiores del corte", () => onToggle("interior"), options.interior)}
-        {button("Cama", "Mostrar u ocultar la cama de impresión", () => onToggle("plate"), options.plate)}
-      </div>
-    </>
   );
 }

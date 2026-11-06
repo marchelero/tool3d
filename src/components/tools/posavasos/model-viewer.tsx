@@ -1,19 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import {
-  ArrowDown,
-  Box,
-  Grid3x3,
-  Maximize2,
-  Minimize2,
-  RefreshCw,
-  Rotate3d,
-  Scan,
-  ZoomIn,
-  ZoomOut,
-} from "lucide-react";
+import { Rotate3d } from "lucide-react";
 import {
   Box3,
   BufferGeometry,
@@ -36,6 +24,8 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { MeshPiece } from "@/lib/3d/mesh";
+import { StandardModelViewerToolbar, type ModelViewPreset } from "@/components/tools/shared/model-viewer-toolbar";
+import { COASTER_CAMERA_UP, coasterViewDirection } from "./model-viewer-view";
 
 export interface RingDrag {
   active: boolean;
@@ -51,8 +41,8 @@ interface ModelViewerProps {
   widthMm: number;
   heightMm: number;
   designMm?: number;
-  expanded?: boolean;
-  onToggleExpanded?: () => void;
+  expanded: boolean;
+  onToggleExpanded: () => void;
   ringDrag?: RingDrag;
   className?: string;
 }
@@ -67,7 +57,7 @@ export function ModelViewer({
   widthMm,
   heightMm,
   designMm = 0,
-  expanded = false,
+  expanded,
   onToggleExpanded,
   ringDrag,
   className,
@@ -336,24 +326,16 @@ export function ModelViewer({
     }
   }, [wireframe]);
 
-  const applyView = useCallback((mode: "iso" | "top" | "front") => {
+  const applyView = useCallback((mode: ModelViewPreset) => {
     const camera = cameraRef.current;
     const controls = controlsRef.current;
     const fit = fitRef.current;
     if (!camera || !controls || !fit) return;
     const { center, distance } = fit;
-    if (mode === "top") {
-      camera.position.set(center.x, center.y - 0.01, center.z + distance);
-    } else if (mode === "front") {
-      camera.position.set(center.x, center.y - distance, center.z + 0.01);
-    } else {
-      camera.position.set(
-        center.x + distance * 0.62,
-        center.y - distance * 0.62,
-        center.z + distance * 0.55
-      );
-    }
     controls.target.copy(center);
+    camera.up.set(...COASTER_CAMERA_UP);
+    camera.position.copy(center).addScaledVector(coasterViewDirection(mode), distance);
+    camera.lookAt(center);
     controls.update();
   }, []);
 
@@ -439,61 +421,25 @@ export function ModelViewer({
         className="size-full overflow-hidden rounded-lg border bg-gradient-to-b from-muted/40 to-muted/10"
       />
 
-      <div className="absolute top-2 right-2 flex flex-col gap-1.5">
-        {onToggleExpanded ? (
-          <ViewerButton
-            label={expanded ? "Restaurar (Esc)" : "Maximizar vista 3D"}
-            onClick={onToggleExpanded}
-          >
-            {expanded ? (
-              <Minimize2 className="size-4" />
-            ) : (
-              <Maximize2 className="size-4" />
-            )}
-          </ViewerButton>
-        ) : null}
-        <ViewerButton label="Acercar" onClick={() => zoomBy(0.8)}>
-          <ZoomIn className="size-4" />
-        </ViewerButton>
-        <ViewerButton label="Alejar" onClick={() => zoomBy(1.25)}>
-          <ZoomOut className="size-4" />
-        </ViewerButton>
-        <ViewerButton
-          label="Centrar (isométrica)"
-          onClick={() => applyView("iso")}
-        >
-          <RefreshCw className="size-4" />
-        </ViewerButton>
-        <ViewerButton label="Vista superior" onClick={() => applyView("top")}>
-          <ArrowDown className="size-4" />
-        </ViewerButton>
-        <ViewerButton label="Vista frontal" onClick={() => applyView("front")}>
-          <Scan className="size-4" />
-        </ViewerButton>
-        <ViewerButton
-          label={showGrid ? "Ocultar cuadrícula (10 mm)" : "Mostrar cuadrícula (10 mm)"}
-          active={showGrid}
-          onClick={() => setShowGrid((value) => !value)}
-        >
-          <Grid3x3 className="size-4" />
-        </ViewerButton>
-        <ViewerButton
-          label={wireframe ? "Ver sólido" : "Ver alambre"}
-          active={wireframe}
-          onClick={() => setWireframe((value) => !value)}
-        >
-          <Box className="size-4" />
-        </ViewerButton>
-        <ViewerButton
-          label={
-            autoRotate ? "Detener rotación" : "Rotación automática"
-          }
-          active={autoRotate}
-          onClick={() => setAutoRotate((value) => !value)}
-        >
-          <Rotate3d className="size-4" />
-        </ViewerButton>
-      </div>
+      <StandardModelViewerToolbar
+        expanded={expanded}
+        onToggleExpanded={onToggleExpanded}
+        onZoomIn={() => zoomBy(0.8)}
+        onZoomOut={() => zoomBy(1.25)}
+        onCenter={() => applyView("iso")}
+        onViewPreset={applyView}
+        gridVisible={showGrid}
+        onToggleGrid={() => setShowGrid((value) => !value)}
+        wireframeVisible={wireframe}
+        onToggleWireframe={() => setWireframe((value) => !value)}
+        extraActions={[{
+          id: "auto-rotate",
+          label: autoRotate ? "Detener rotación" : "Rotación automática",
+          icon: <Rotate3d className="size-4" />,
+          onClick: () => setAutoRotate((value) => !value),
+          active: autoRotate,
+        }]}
+      />
 
       <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-background/80 px-2 py-1 text-[11px] tabular-nums text-muted-foreground backdrop-blur">
         Ancho {Math.round(widthMm * 10) / 10} mm · Alto{" "}
@@ -506,34 +452,5 @@ export function ModelViewer({
           : "Arrastra para girar · rueda o botones para acercar"}
       </div>
     </div>
-  );
-}
-
-function ViewerButton({
-  label,
-  active = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      aria-pressed={active}
-      title={label}
-      className={`flex size-8 items-center justify-center rounded-md border shadow-sm backdrop-blur transition-colors ${
-        active
-          ? "border-primary/50 bg-primary/15 text-primary hover:bg-primary/25"
-          : "bg-background/85 text-foreground hover:bg-accent"
-      }`}
-    >
-      {children}
-    </button>
   );
 }

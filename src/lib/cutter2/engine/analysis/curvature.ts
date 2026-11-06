@@ -1,4 +1,5 @@
 import type { MeshContext } from '../core/MeshContext';
+import type { TaskContext } from '../core/TaskContext';
 
 /**
  * Campo de curvatura multiescala (tensor de Taubin).
@@ -19,7 +20,17 @@ export interface CurvatureField {
   reference: number;
 }
 
-export function computeCurvature(ctx: MeshContext, scaleRel = 0.012): CurvatureField {
+interface CurvatureStep {
+  message: string;
+  fraction: number;
+}
+
+const CHECKPOINT_INTERVAL = 512;
+
+function* computeCurvatureSteps(
+  ctx: MeshContext,
+  scaleRel: number,
+): Generator<CurvatureStep, CurvatureField, void> {
   const key = `curv:${scaleRel}`;
   const cached = ctx.cache.get(key) as CurvatureField | undefined;
   if (cached) return cached;
@@ -61,44 +72,52 @@ export function computeCurvature(ctx: MeshContext, scaleRel = 0.012): CurvatureF
     const a = E0[e], b = E1[e];
     const dx = P[3 * b] - P[3 * a], dy = P[3 * b + 1] - P[3 * a + 1], dz = P[3 * b + 2] - P[3 * a + 2];
     const l2 = dx * dx + dy * dy + dz * dz;
-    if (l2 <= 0) continue;
-    const k = ((N[3 * b] - N[3 * a]) * dx + (N[3 * b + 1] - N[3 * a + 1]) * dy + (N[3 * b + 2] - N[3 * a + 2]) * dz) / l2;
-    const w = Math.sqrt(l2);
-    addTo(a, b, k, w);
-    addTo(b, a, k, w);
+    if (l2 > 0) {
+      const k = ((N[3 * b] - N[3 * a]) * dx + (N[3 * b + 1] - N[3 * a + 1]) * dy + (N[3 * b + 2] - N[3 * a + 2]) * dz) / l2;
+      const w = Math.sqrt(l2);
+      addTo(a, b, k, w);
+      addTo(b, a, k, w);
+    }
+    if ((e + 1) % CHECKPOINT_INTERVAL === 0) {
+      yield { message: 'Calculando curvatura: aristas', fraction: 0.2 * ((e + 1) / Math.max(nE, 1)) };
+    }
   }
   const kminRaw = new Float64Array(nV);
   for (let v = 0; v < nV; v++) {
-    if (W[v] <= 0) continue;
-    const o = 6 * v;
-    const inv = 1 / W[v];
-    Hraw[v] *= inv;
-    const nx = N[3 * v], ny = N[3 * v + 1], nz = N[3 * v + 2];
-    // Base tangente
-    let ax: number, ay: number, az: number;
-    if (Math.abs(nx) < 0.9) {
-      ax = 0; ay = nz; az = -ny;
-    } else {
-      ax = -nz; ay = 0; az = nx;
+    if (W[v] > 0) {
+      const o = 6 * v;
+      const inv = 1 / W[v];
+      Hraw[v] *= inv;
+      const nx = N[3 * v], ny = N[3 * v + 1], nz = N[3 * v + 2];
+      // Base tangente
+      let ax: number, ay: number, az: number;
+      if (Math.abs(nx) < 0.9) {
+        ax = 0; ay = nz; az = -ny;
+      } else {
+        ax = -nz; ay = 0; az = nx;
+      }
+      const al = Math.hypot(ax, ay, az) || 1;
+      ax /= al; ay /= al; az /= al;
+      const bx = ny * az - nz * ay, by = nz * ax - nx * az, bz = nx * ay - ny * ax;
+      const quad = (ux: number, uy: number, uz: number, vx: number, vy: number, vz: number) =>
+        inv *
+        (ux * (M[o] * vx + M[o + 1] * vy + M[o + 2] * vz) +
+          uy * (M[o + 1] * vx + M[o + 3] * vy + M[o + 4] * vz) +
+          uz * (M[o + 2] * vx + M[o + 4] * vy + M[o + 5] * vz));
+      const m11 = quad(ax, ay, az, ax, ay, az);
+      const m12 = quad(ax, ay, az, bx, by, bz);
+      const m22 = quad(bx, by, bz, bx, by, bz);
+      const tr = m11 + m22;
+      const det = m11 * m22 - m12 * m12;
+      const disc = Math.sqrt(Math.max(0, (tr * tr) / 4 - det));
+      const e1 = tr / 2 + disc; // mayor
+      const e2 = tr / 2 - disc; // menor
+      // Taubin: κ = 3m - m'
+      kminRaw[v] = 3 * e2 - e1;
     }
-    const al = Math.hypot(ax, ay, az) || 1;
-    ax /= al; ay /= al; az /= al;
-    const bx = ny * az - nz * ay, by = nz * ax - nx * az, bz = nx * ay - ny * ax;
-    const quad = (ux: number, uy: number, uz: number, vx: number, vy: number, vz: number) =>
-      inv *
-      (ux * (M[o] * vx + M[o + 1] * vy + M[o + 2] * vz) +
-        uy * (M[o + 1] * vx + M[o + 3] * vy + M[o + 4] * vz) +
-        uz * (M[o + 2] * vx + M[o + 4] * vy + M[o + 5] * vz));
-    const m11 = quad(ax, ay, az, ax, ay, az);
-    const m12 = quad(ax, ay, az, bx, by, bz);
-    const m22 = quad(bx, by, bz, bx, by, bz);
-    const tr = m11 + m22;
-    const det = m11 * m22 - m12 * m12;
-    const disc = Math.sqrt(Math.max(0, (tr * tr) / 4 - det));
-    const e1 = tr / 2 + disc; // mayor
-    const e2 = tr / 2 - disc; // menor
-    // Taubin: κ = 3m - m'
-    kminRaw[v] = 3 * e2 - e1;
+    if ((v + 1) % CHECKPOINT_INTERVAL === 0) {
+      yield { message: 'Calculando curvatura: vértices', fraction: 0.2 + 0.1 * ((v + 1) / Math.max(nV, 1)) };
+    }
   }
 
   // Suavizado a la escala pedida.
@@ -108,38 +127,91 @@ export function computeCurvature(ctx: MeshContext, scaleRel = 0.012): CurvatureF
   for (let e = 0; e < nE; e++) {
     deg[E0[e]]++;
     deg[E1[e]]++;
+    if ((e + 1) % CHECKPOINT_INTERVAL === 0) {
+      yield { message: 'Calculando curvatura: grados', fraction: 0.3 + 0.05 * ((e + 1) / Math.max(nE, 1)) };
+    }
   }
-  const smooth = (src: Float64Array): Float64Array => {
+  const smooth = function* (
+    src: Float64Array,
+    start: number,
+    end: number,
+    message: string,
+  ): Generator<CurvatureStep, Float64Array, void> {
     let cur = Float64Array.from(src);
     let next = new Float64Array(nV);
+    const totalWork = Math.max(1, iters * (nE + nV));
+    let completedWork = 0;
     for (let it = 0; it < iters; it++) {
       next.fill(0);
       for (let e = 0; e < nE; e++) {
         next[E0[e]] += cur[E1[e]];
         next[E1[e]] += cur[E0[e]];
+        completedWork++;
+        if (completedWork % CHECKPOINT_INTERVAL === 0) {
+          yield { message, fraction: start + (end - start) * (completedWork / totalWork) };
+        }
       }
-      for (let v = 0; v < nV; v++) next[v] = deg[v] > 0 ? 0.5 * cur[v] + (0.5 * next[v]) / deg[v] : cur[v];
+      for (let v = 0; v < nV; v++) {
+        next[v] = deg[v] > 0 ? 0.5 * cur[v] + (0.5 * next[v]) / deg[v] : cur[v];
+        completedWork++;
+        if (completedWork % CHECKPOINT_INTERVAL === 0) {
+          yield { message, fraction: start + (end - start) * (completedWork / totalWork) };
+        }
+      }
       const t = cur;
       cur = next;
       next = t;
     }
     return cur;
   };
-  const kmin = smooth(kminRaw);
-  const H = smooth(Hraw);
+  const kmin = yield* smooth(kminRaw, 0.35, 0.625, 'Suavizando curvatura mínima');
+  const H = yield* smooth(Hraw, 0.625, 0.9, 'Suavizando curvatura media');
 
   const reference = 0.25 / Math.max(scale, 1e-9);
   const valley = new Float32Array(nV);
   for (let v = 0; v < nV; v++) {
     const c = -kmin[v] / reference;
     valley[v] = c > 0 ? 1 - Math.exp(-1.5 * c) : 0;
+    if ((v + 1) % CHECKPOINT_INTERVAL === 0) {
+      yield { message: 'Calculando curvatura: valles', fraction: 0.9 + 0.05 * ((v + 1) / Math.max(nV, 1)) };
+    }
   }
   const nF = topo.nF;
   const I = ctx.I;
   const valleyFace = new Float32Array(nF);
-  for (let f = 0; f < nF; f++) valleyFace[f] = (valley[I[3 * f]] + valley[I[3 * f + 1]] + valley[I[3 * f + 2]]) / 3;
+  for (let f = 0; f < nF; f++) {
+    valleyFace[f] = (valley[I[3 * f]] + valley[I[3 * f + 1]] + valley[I[3 * f + 2]]) / 3;
+    if ((f + 1) % CHECKPOINT_INTERVAL === 0) {
+      yield { message: 'Calculando curvatura: caras', fraction: 0.95 + 0.04 * ((f + 1) / Math.max(nF, 1)) };
+    }
+  }
 
+  yield { message: 'Curvatura lista', fraction: 0.995 };
   const field: CurvatureField = { H, kmin, valley, valleyFace, scale, reference };
   ctx.cache.set(key, field);
   return field;
+}
+
+export function computeCurvature(ctx: MeshContext, scaleRel = 0.012): CurvatureField {
+  const steps = computeCurvatureSteps(ctx, scaleRel);
+  let result = steps.next();
+  while (!result.done) result = steps.next();
+  return result.value;
+}
+
+export async function computeCurvatureCooperative(
+  ctx: MeshContext,
+  scaleRel: number,
+  task: TaskContext,
+  range: { start: number; end: number } = { start: 0, end: 1 },
+): Promise<CurvatureField> {
+  task.throwIfCancelled();
+  const steps = computeCurvatureSteps(ctx, scaleRel);
+  let result = steps.next();
+  while (!result.done) {
+    const fraction = range.start + (range.end - range.start) * result.value.fraction;
+    await task.checkpoint(result.value.message, fraction);
+    result = steps.next();
+  }
+  return result.value;
 }

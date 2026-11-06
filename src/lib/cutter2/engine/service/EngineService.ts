@@ -5,7 +5,7 @@ import { computeBBox, signedVolume } from '../core/geometry';
 import { importModel } from '../import/ModelImporter';
 import { subMesh } from '../import/weld';
 import { analyzeMesh, type ModelAnalysis } from '../analysis/MeshAnalyzer';
-import { computeCurvature } from '../analysis/curvature';
+import { computeCurvatureCooperative } from '../analysis/curvature';
 import { segmentMesh } from '../selection/SmartSelection';
 import { SurfaceSplineEngine, type PerimeterInput, type PerimeterResult } from '../perimeter/SurfaceSplineEngine';
 import { suggestPerimeters, type PerimeterSuggestion } from '../perimeter/BoundarySuggestionEngine';
@@ -412,7 +412,7 @@ export class EngineService implements EngineServiceApi {
     const p = this.piece(pieceId);
     await task.checkpoint('Analizando curvatura', 0.1);
     const ctx = this.context(p);
-    const curv = computeCurvature(ctx);
+    const curv = await computeCurvatureCooperative(ctx, 0.012, task, { start: 0.1, end: 0.48 });
     await task.checkpoint('Segmentando regiones', 0.5);
     const seg = segmentMesh(ctx);
     task.progress(1);
@@ -579,7 +579,8 @@ export class EngineService implements EngineServiceApi {
     const p = this.piece(pieceId);
     await task.checkpoint('Buscando límites naturales', 0.2);
     const ctx = this.context(p);
-    const res = suggestPerimeters(ctx, selection);
+    const res = await suggestPerimeters(ctx, selection, task);
+    await task.checkpoint('Preparando sugerencias para el visor', 0.995);
     const polylineOf = (loop: number[]) => {
       const P = ctx.P;
       const polyline = new Float32Array((loop.length + 1) * 3);
@@ -612,12 +613,14 @@ export class EngineService implements EngineServiceApi {
         polyline: loops[0].polyline,
       };
     };
-    return {
+    const result = {
       suggestions: res.suggestions.map(toView),
       reliable: res.reliable,
       message: res.message,
       selectionBoundary: res.selectionBoundary ? toView(res.selectionBoundary) : undefined,
     };
+    await task.checkpoint('Sugerencias listas', 1);
+    return result;
   }
 
   // ---------------------------------------------------------------- corte

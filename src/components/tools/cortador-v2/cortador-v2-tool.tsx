@@ -54,6 +54,9 @@ import type {
 import { Cutter2Viewer, type FaceHit, type ViewerMode, type ViewerPiece } from "./viewer";
 
 type StepId = 1 | 2 | 3 | 4 | 5 | 6;
+type EngineCall = <M extends EngineMethod>(methodName: M, ...args: Parameters<EngineApi[M]>) => ReturnType<EngineApi[M]>;
+
+const CANCELLABLE_METHODS = new Set<EngineMethod>(["analyzeModel", "getSelectionData", "suggestPerimeters", "previewCut"]);
 
 type PerimeterEditor = {
   view: PerimeterView;
@@ -165,6 +168,8 @@ function downloadFile(file: { name: string; data: Uint8Array; mime: string }): v
 
 export function CortadorV2Tool() {
   const clientRef = useRef<Cutter2Client | null>(null);
+  const activeTaskRef = useRef<{ client: Cutter2Client; id: number } | null>(null);
+  const cancelRequestedRef = useRef(false);
   const getClient = () => {
     if (!clientRef.current) clientRef.current = new Cutter2Client();
     return clientRef.current;
@@ -172,12 +177,16 @@ export function CortadorV2Tool() {
   useEffect(() => () => clientRef.current?.dispose(), []);
 
   const [step, setStep] = useState<StepId>(1);
+  const [viewerExpanded, setViewerExpanded] = useState(false);
   const [model, setModel] = useState<ModelInfo | null>(null);
   const [doc, setDoc] = useState<DocumentView | null>(null);
   const [geoms, setGeoms] = useState<Record<string, PieceGeometry>>({});
   const [analysis, setAnalysis] = useState<ModelAnalysis | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
+  const [canCancel, setCanCancel] = useState(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
   const [fitKey, setFitKey] = useState("0");
 
   const [orientMode, setOrientMode] = useState(false);
@@ -226,24 +235,75 @@ export function CortadorV2Tool() {
   const [exportSel, setExportSel] = useState<Record<string, boolean>>({});
   const [exportResult, setExportResult] = useState<ExportResult | null>(null);
 
-  const call = useCallback(<M extends EngineMethod>(methodName: M, ...args: Parameters<EngineApi[M]>) => {
-    return getClient().call(methodName, args, { onProgress: (fraction: number) => setProgress(fraction) }).promise;
+  useEffect(() => {
+    if (!viewerExpanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setViewerExpanded(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [viewerExpanded]);
+
+  const call = useCallback<EngineCall>(<M extends EngineMethod>(methodName: M, ...args: Parameters<EngineApi[M]>) => {
+    const client = getClient();
+    const { id, promise } = client.call(methodName, args, {
+      onProgress: (fraction, message) => {
+        setProgress((current) => Math.min(1, Math.max(current, fraction)));
+        if (message) setProgressMessage(message);
+      },
+    });
+    if (CANCELLABLE_METHODS.has(methodName)) {
+      activeTaskRef.current = { client, id };
+      cancelRequestedRef.current = false;
+      setCancelRequested(false);
+      setCanCancel(true);
+    }
+    return promise.finally(() => {
+      if (activeTaskRef.current?.id === id) {
+        activeTaskRef.current = null;
+        setCanCancel(false);
+        setCancelRequested(false);
+        cancelRequestedRef.current = false;
+      }
+    }) as ReturnType<EngineApi[M]>;
   }, []);
 
   const run = useCallback(async function run<T>(label: string, work: () => Promise<T>, quiet = false): Promise<T | null> {
     setBusy(label);
     setProgress(0);
+    setProgressMessage(label);
+    setCanCancel(false);
+    activeTaskRef.current = null;
+    cancelRequestedRef.current = false;
+    setCancelRequested(false);
     try {
       return await work();
     } catch (error) {
       const failure = error as EngineError;
-      if (failure?.cancelled) return null;
+      if (failure?.cancelled) {
+        toast.info("Operación cancelada. No se aplicaron cambios.");
+        return null;
+      }
       const message = failure?.message ?? "Algo salió mal.";
       if (!quiet) toast.error(message);
       return null;
     } finally {
       setBusy(null);
+      setProgressMessage(null);
+      setCanCancel(false);
+      setCancelRequested(false);
+      cancelRequestedRef.current = false;
+      activeTaskRef.current = null;
     }
+  }, []);
+
+  const cancelActiveTask = useCallback(() => {
+    const activeTask = activeTaskRef.current;
+    if (!activeTask || cancelRequestedRef.current) return;
+    cancelRequestedRef.current = true;
+    setCancelRequested(true);
+    setProgressMessage("Cancelando operación…");
+    activeTask.client.cancel(activeTask.id);
   }, []);
 
   const syncDoc = useCallback((next: DocumentView) => {
@@ -950,8 +1010,10 @@ export function CortadorV2Tool() {
   const hasFixedPerimeter = perimeters.some((editor) => editor.fixedPathId !== null);
 
   return (
-    <div className="flex h-[calc(100dvh-3.5rem)] w-full flex-col overflow-hidden lg:flex-row">
-      <aside className="flex w-full shrink-0 flex-col border-b bg-card/40 lg:h-full lg:w-[27rem] lg:border-b-0 lg:border-r">
+    <div className={viewerExpanded
+      ? "fixed inset-0 z-50 grid h-dvh min-h-0 w-full grid-rows-[minmax(12rem,36dvh)_minmax(0,1fr)] overflow-hidden bg-background lg:grid-cols-[minmax(0,1fr)_27rem] lg:grid-rows-1"
+      : "grid h-[calc(100dvh-3.5rem)] min-h-0 w-full grid-rows-[minmax(12rem,36dvh)_minmax(0,1fr)] overflow-hidden lg:grid-cols-[minmax(0,1fr)_27rem] lg:grid-rows-1"}>
+      <aside className="order-2 flex min-h-0 min-w-0 flex-col border-t bg-card/40 lg:order-2 lg:border-l lg:border-t-0">
         <div className="border-b px-4 py-3">
           <div className="flex items-center gap-2">
             <Scissors className="size-4 text-primary" />
@@ -963,23 +1025,26 @@ export function CortadorV2Tool() {
           <p className="mt-1 text-xs text-muted-foreground">
             Cortes por perímetro 3D con tapas planas o curvas, encastres y validación de sólidos.
           </p>
-          <ol className="mt-3 flex flex-wrap gap-1">
-            {STEPS.map((item) => (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  onClick={() => setStep(item.id)}
-                  className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${
-                    item.id === step
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-transparent text-muted-foreground hover:bg-accent"
-                  }`}
-                >
-                  {item.id}. {item.title}
-                </button>
-              </li>
-            ))}
-          </ol>
+          <nav aria-label="Pasos del cortador">
+            <ol className="mt-3 flex flex-wrap gap-1">
+              {STEPS.map((item) => (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    aria-current={item.id === step ? "step" : undefined}
+                    onClick={() => setStep(item.id)}
+                    className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${
+                      item.id === step
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-transparent text-muted-foreground hover:bg-accent"
+                    }`}
+                  >
+                    {item.id}. {item.title}
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </nav>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
@@ -989,10 +1054,10 @@ export function CortadorV2Tool() {
               <p className="text-xs text-muted-foreground">{currentStep.hint}</p>
             </div>
             <div className="flex gap-1">
-              <Button variant="ghost" size="icon-sm" onClick={undo} disabled={!doc?.canUndo || !!busy} title="Deshacer">
+              <Button variant="ghost" size="icon-sm" onClick={undo} disabled={!doc?.canUndo || !!busy} title="Deshacer" aria-label="Deshacer última acción">
                 <RotateCcw className="size-4" />
               </Button>
-              <Button variant="ghost" size="icon-sm" onClick={redo} disabled={!doc?.canRedo || !!busy} title="Rehacer">
+              <Button variant="ghost" size="icon-sm" onClick={redo} disabled={!doc?.canRedo || !!busy} title="Rehacer" aria-label="Rehacer última acción">
                 <RotateCw className="size-4" />
               </Button>
             </div>
@@ -1756,15 +1821,37 @@ export function CortadorV2Tool() {
 
         <div className="border-t px-4 py-3">
           {busy && (
-            <div className="mb-2">
-              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                <Loader2 className="size-3 animate-spin" />
-                {busy}
-                {progress > 0 && <span className="ml-auto">{Math.round(progress * 100)}%</span>}
+            <div className="mb-2 space-y-2">
+              <div role="status" aria-live="polite" className="space-y-1">
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  <span>{progressMessage ?? busy}</span>
+                  {progress > 0 && <span className="ml-auto">{Math.round(progress * 100)}%</span>}
+                </div>
+                <div
+                  className="h-1 overflow-hidden rounded-full bg-muted"
+                  role="progressbar"
+                  aria-label={progressMessage ?? busy}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(progress * 100)}
+                >
+                  <div className="h-full bg-primary transition-[width]" style={{ width: `${Math.max(4, progress * 100)}%` }} />
+                </div>
               </div>
-              <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted">
-                <div className="h-full bg-primary transition-[width]" style={{ width: `${Math.max(4, progress * 100)}%` }} />
-              </div>
+              {canCancel && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="min-h-9 w-full"
+                  aria-label={cancelRequested ? "Cancelando operación" : "Cancelar operación"}
+                  onClick={cancelActiveTask}
+                  disabled={cancelRequested}
+                >
+                  {cancelRequested ? "Cancelando…" : "Cancelar"}
+                </Button>
+              )}
             </div>
           )}
           <div className="flex gap-2">
@@ -1834,7 +1921,7 @@ export function CortadorV2Tool() {
         </div>
       </aside>
 
-      <div className="relative min-h-0 flex-1 bg-gradient-to-b from-muted/40 to-background">
+      <div className="relative order-1 min-h-0 min-w-0 bg-gradient-to-b from-muted/40 to-background lg:order-1">
         <Cutter2Viewer
           pieces={viewerPieces}
           activePieceId={activeId}
@@ -1845,8 +1932,11 @@ export function CortadorV2Tool() {
           seamLines={seamLines}
           mode={viewerMode}
           fitKey={fitKey}
+          expanded={viewerExpanded}
+          onToggleExpanded={() => setViewerExpanded((value) => !value)}
           showRings={step === 1}
           paintEnabled={step === 2 && selTool !== "wand"}
+          brushRadius={brush}
           onFaceClick={(hit, mods) => {
             if (step === 1 && orientMode) void dropFaceOnBed(hit);
             else if (step === 2) onSelectionClick(hit, mods);

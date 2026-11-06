@@ -1,4 +1,5 @@
 ﻿import { describe, expect, it } from "vitest";
+import { CancelledError, type TaskContext } from "./engine/core/TaskContext";
 import { EngineService } from "./engine/service/EngineService";
 
 /** Cubo subdividido (n×n por cara) como sopa de triángulos orientados hacia afuera. */
@@ -38,7 +39,35 @@ function toAsciiStl(tris: number[][]): ArrayBuffer {
   return new TextEncoder().encode(lines.join("\n")).buffer as ArrayBuffer;
 }
 
+class CancelDuringCurvature implements TaskContext {
+  readonly cancelled = false;
+  readonly messages: string[] = [];
+
+  progress(_fraction: number, message?: string): void {
+    if (message) this.messages.push(message);
+  }
+
+  async checkpoint(message?: string): Promise<void> {
+    if (message) this.messages.push(message);
+    if (message && message !== "Analizando curvatura" && message.toLowerCase().includes("curvatura")) {
+      throw new CancelledError();
+    }
+  }
+
+  throwIfCancelled(): void {}
+}
+
 describe("motor cutter2", () => {
+  it("cancela getSelectionData dentro de curvatura sin publicar datos parciales", async () => {
+    const service = new EngineService();
+    const { doc } = await service.loadModel("cubo-grande.stl", toAsciiStl(boxTriangles(30, 20)));
+    const task = new CancelDuringCurvature();
+
+    await expect(service.getSelectionData(doc.pieces[0].id, task)).rejects.toBeInstanceOf(CancelledError);
+    expect(task.messages.some((message) => message !== "Analizando curvatura" && message.toLowerCase().includes("curvatura"))).toBe(true);
+    expect(task.messages).not.toContain("Segmentando regiones");
+  }, 30_000);
+
   it("carga, selecciona, sugiere perímetro, corta, encastra y exporta", async () => {
     const service = new EngineService();
     const S = 30;

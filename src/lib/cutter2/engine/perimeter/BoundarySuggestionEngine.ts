@@ -1,6 +1,7 @@
 import type { MeshContext } from '../core/MeshContext';
 import { MinHeap } from '../core/heap';
-import { computeCurvature } from '../analysis/curvature';
+import { computeCurvatureCooperative } from '../analysis/curvature';
+import { NULL_CONTEXT, type TaskContext } from '../core/TaskContext';
 import { MaxFlow } from './maxflow';
 
 export type SuggestionKind = 'ajustado' | 'suave' | 'amplio' | 'seleccion';
@@ -46,8 +47,53 @@ export interface SuggestionResult {
 }
 
 const BIG = 1e18;
+const CHECKPOINT_INTERVAL = 512;
 /** Partes separadas que se pueden cortar juntas. */
 export const MAX_REGIONS = 16;
+
+function rangedTask(task: TaskContext, message: string, start: number, end: number): TaskContext {
+  let checkpoints = 0;
+  let latest = start;
+  let lastPublishedProgress = start;
+  let lastPublishedMessage = '';
+  let lastPublishedAt = 0;
+  const nextProgress = () => start + (end - start) * Math.min(0.995, 1 - Math.exp(-checkpoints / 600));
+  const shouldPublish = (detail: string): boolean => {
+    const now = Date.now();
+    if (
+      detail === lastPublishedMessage &&
+      latest - lastPublishedProgress < 0.002 &&
+      now - lastPublishedAt < 100 &&
+      latest < end
+    ) {
+      return false;
+    }
+    lastPublishedAt = now;
+    lastPublishedProgress = latest;
+    lastPublishedMessage = detail;
+    return true;
+  };
+  return {
+    get cancelled() { return task.cancelled; },
+    progress(fraction, detail) {
+      const mapped = start + (end - start) * Math.max(0, Math.min(1, fraction));
+      latest = Math.max(latest, mapped);
+      const phase = detail ?? message;
+      if (shouldPublish(phase)) task.progress(latest, phase);
+    },
+    async checkpoint(checkpointMessage, fraction) {
+      checkpoints++;
+      const mapped = fraction === undefined
+        ? nextProgress()
+        : start + (end - start) * Math.max(0, Math.min(1, fraction));
+      latest = Math.max(latest, mapped);
+      const phase = checkpointMessage ?? message;
+      if (shouldPublish(phase)) await task.checkpoint(phase, latest);
+      else await task.checkpoint();
+    },
+    throwIfCancelled() { task.throwIfCancelled(); },
+  };
+}
 
 interface Region {
   faces: number[];
@@ -67,14 +113,50 @@ interface Region {
  * elegidos con Ctrl+clic): se resuelve un único corte mínimo para todas, que
  * devuelve un lazo alrededor de cada una. Los lazos nunca se cruzan.
  */
-export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): SuggestionResult {
+export async function suggestPerimeters(
+  ctx: MeshContext,
+  selection: Uint8Array,
+  task: TaskContext = NULL_CONTEXT,
+): Promise<SuggestionResult> {
   const { topo, faceAreas, P, I } = ctx;
   const nF = topo.nF;
   const nV = topo.nV;
-  const curv = computeCurvature(ctx);
+  let lastProgress = 0.2;
+  let lastPublishedProgress = lastProgress;
+  let lastPublishedMessage = '';
+  let lastPublishedAt = 0;
+  const checkpoint = async (message: string, fraction: number) => {
+    lastProgress = Math.max(lastProgress, Math.min(0.99, fraction));
+    const now = Date.now();
+    const shouldPublish =
+      message !== lastPublishedMessage ||
+      lastProgress - lastPublishedProgress >= 0.002 ||
+      now - lastPublishedAt >= 100 ||
+      lastProgress >= 0.99;
+    if (shouldPublish) {
+      lastPublishedAt = now;
+      lastPublishedProgress = lastProgress;
+      lastPublishedMessage = message;
+      await task.checkpoint(message, lastProgress);
+    } else {
+      await task.checkpoint();
+    }
+  };
+  const checkpointLoop = (i: number, total: number, message: string, from: number, to: number): Promise<void> | null => {
+    if ((i + 1) % CHECKPOINT_INTERVAL !== 0) return null;
+    return checkpoint(message, from + (to - from) * Math.min(1, (i + 1) / Math.max(1, total)));
+  };
+
+  await checkpoint('Calculando curvatura', 0.22);
+  const curv = await computeCurvatureCooperative(
+    ctx,
+    0.012,
+    rangedTask(task, 'Calculando curvatura', 0.22, 0.32),
+  );
+  await checkpoint('Preparando selección', 0.32);
 
   // 1) Partes seleccionadas (sin motas sueltas) con sus agujeros rellenos.
-  let parts = selectedComponents(ctx, selection);
+  let parts = await selectedComponentsCooperative(ctx, selection, task, 0.32, 0.35);
   if (!parts.length) return { suggestions: [], reliable: false, message: 'Seleccioná primero la pieza que querés separar.' };
   const largest = parts[0].area;
   parts = parts.filter((p) => p.area >= 0.01 * largest);
@@ -83,11 +165,15 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   }
   const inR = new Uint8Array(nF);
   const activeComp = new Uint8Array(ctx.componentCount);
+  let selectedFacesScanned = 0;
+  const selectedFaceCount = parts.reduce((sum, p) => sum + p.faces.length, 0);
   for (const p of parts) for (const f of p.faces) {
     inR[f] = 1;
     activeComp[ctx.faceComponent[f]] = 1;
+      const pendingCheckpoint = checkpointLoop(selectedFacesScanned++, selectedFaceCount, 'Preparando regiones seleccionadas', 0.35, 0.37);
+    if (pendingCheckpoint) await pendingCheckpoint;
   }
-  fillHoles(ctx, inR, activeComp);
+  await fillHolesCooperative(ctx, inR, activeComp, task, 0.37, 0.39);
   const compArea = new Float64Array(ctx.componentCount);
   const compSel = new Float64Array(ctx.componentCount);
   for (let f = 0; f < nF; f++) {
@@ -95,6 +181,8 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
     if (!activeComp[c]) continue;
     compArea[c] += faceAreas[f];
     if (inR[f]) compSel[c] += faceAreas[f];
+      const pendingCheckpoint = checkpointLoop(f, nF, 'Midiendo regiones', 0.39, 0.42);
+    if (pendingCheckpoint) await pendingCheckpoint;
   }
   for (let c = 0; c < ctx.componentCount; c++) {
     if (activeComp[c] && compSel[c] >= compArea[c] * 0.999) {
@@ -108,7 +196,7 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   // esto, en una pieza grande el corte mínimo se iba a cualquier cuello o
   // surco más corto dentro de la selección (el tobillo de una bota en vez de
   // la caña, donde la bota termina).
-  const selLoops = extractLoops(ctx, inR);
+  const selLoops = await extractLoopsCooperative(ctx, inR, task, 0.42, 0.43);
   if (selLoops && selLoops.length === 0) {
     // Superficie cerrada unida al resto solo por aristas no-manifold o vértices
     // (por ejemplo, un cuerpo pegado por una arista): no hay borde que cortar.
@@ -123,11 +211,12 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   const tight = Math.max(0, Math.min(1, (prior - 0.5) / 0.3));
   const fIn = 0.6 - 0.45 * tight;
   const fOut = 0.85 - 0.6 * tight;
+  await checkpoint('Calculando distancia a la selección', 0.43);
 
   // Zonas definitivas (después de rellenar) y su tamaño.
   const regionOf = new Int32Array(nF).fill(-1);
   const regions: Region[] = [];
-  for (const comp of selectedComponents(ctx, inR)) {
+  for (const comp of await selectedComponentsCooperative(ctx, inR, task, 0.43, 0.445)) {
     const r = regions.length;
     for (const f of comp.faces) regionOf[f] = r;
     const rR = Math.sqrt(comp.area / Math.PI);
@@ -148,6 +237,8 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
         vZone[v] = regionOf[f];
       } else vOut[v] = 1;
     }
+    const pendingCheckpoint = checkpointLoop(f, nF, 'Calculando distancia a la selección', 0.445, 0.49);
+    if (pendingCheckpoint) await pendingCheckpoint;
   }
   const dist = new Float64Array(nV).fill(Infinity);
   const zone = new Int32Array(nV).fill(-1);
@@ -158,13 +249,18 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
       zone[v] = vZone[v];
       heap.push(0, v);
     }
+    const pendingCheckpoint = checkpointLoop(v, nV, 'Calculando distancia a la selección', 0.49, 0.54);
+    if (pendingCheckpoint) await pendingCheckpoint;
   }
   const limitOf = regions.map((r) => Math.max(r.Wb, r.Wout) * 1.2);
+  let distanceScanned = 0;
   while (heap.size) {
     const v = heap.pop();
     const dv = heap.lastKey;
     if (dv > dist[v] || dv > limitOf[zone[v]]) continue;
     for (let i = topo.vOutStart[v]; i < topo.vOutStart[v + 1]; i++) {
+      const pendingCheckpoint = checkpointLoop(distanceScanned++, Math.max(topo.nH, 1), 'Propagando distancias geodésicas', 0.54, 0.59);
+      if (pendingCheckpoint) await pendingCheckpoint;
       const w = topo.dest(topo.vOut[i]);
       const nd = dv + Math.hypot(P[3 * w] - P[3 * v], P[3 * w + 1] - P[3 * v + 1], P[3 * w + 2] - P[3 * v + 2]);
       if (nd < dist[w]) {
@@ -208,6 +304,8 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
         deepest[r] = f;
       }
     }
+    const pendingCheckpoint = checkpointLoop(f, nF, 'Clasificando núcleo y exterior', 0.59, 0.65);
+    if (pendingCheckpoint) await pendingCheckpoint;
   }
   regions.forEach((_, r) => {
     if (!hasSource[r] && deepest[r] >= 0) role[deepest[r]] = -1;
@@ -216,17 +314,25 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   // necesita al menos un sumidero: si ninguna cara quedó lo bastante lejos, la más lejana.
   {
     const outer = new Uint8Array(nF);
-    for (let f = 0; f < nF; f++) if (!inR[f] && activeComp[ctx.faceComponent[f]]) outer[f] = 1;
+    for (let f = 0; f < nF; f++) {
+      if (!inR[f] && activeComp[ctx.faceComponent[f]]) outer[f] = 1;
+      const pendingCheckpoint = checkpointLoop(f, nF, 'Buscando el exterior de la pieza', 0.65, 0.67);
+      if (pendingCheckpoint) await pendingCheckpoint;
+    }
     const faceMin = (f: number) => Math.min(sd(I[3 * f]), sd(I[3 * f + 1]), sd(I[3 * f + 2]));
-    for (const comp of selectedComponents(ctx, outer)) {
+  for (const comp of await selectedComponentsCooperative(ctx, outer, task, 0.67, 0.68)) {
       if (comp.faces.some((f) => role[f] === 1)) continue;
       let best = -1, bestD = -Infinity;
+      let outerScanned = 0;
+      const outerCount = comp.faces.length;
       for (const f of comp.faces) {
         const d = faceMin(f);
         if (d > bestD) {
           bestD = d;
           best = f;
         }
+        const pendingCheckpoint = checkpointLoop(outerScanned++, outerCount, 'Buscando el exterior de la pieza', 0.67, 0.68);
+        if (pendingCheckpoint) await pendingCheckpoint;
       }
       if (best >= 0) role[best] = 1;
     }
@@ -239,10 +345,22 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   const kAbs = (a: number, b: number) => Math.abs(curv.kmin[a] + curv.kmin[b]) / 2 / curv.reference;
   const adj = ctx.faceAdj;
 
-  const runCut = (allowed: (f: number) => boolean, isSource: (f: number) => boolean, isSink: (f: number) => boolean, costFactor: (a: number, b: number) => number) => {
+  const runCut = async (
+    allowed: (f: number) => boolean,
+    isSource: (f: number) => boolean,
+    isSink: (f: number) => boolean,
+    costFactor: (a: number, b: number) => number,
+    message: string,
+    start: number,
+    end: number,
+  ): Promise<{ sFaces: Uint8Array; cost: number } | null> => {
     const local = new Int32Array(nF).fill(-1);
     let n = 2;
-    for (let f = 0; f < nF; f++) if (allowed(f)) local[f] = n++;
+    for (let f = 0; f < nF; f++) {
+      if (allowed(f)) local[f] = n++;
+      const pendingCheckpoint = checkpointLoop(f, nF, `${message}: preparando`, start, start + (end - start) * 0.15);
+      if (pendingCheckpoint) await pendingCheckpoint;
+    }
     const S = 0, T = 1;
     const mf = new MaxFlow(n);
     const link = (f: number, lf: number, g: number, c: number) => {
@@ -276,14 +394,19 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
       }
       if (isSource(f)) mf.addEdge(S, lf, BIG, 0);
       if (isSink(f)) mf.addEdge(lf, T, BIG, 0);
+      const pendingCheckpoint = checkpointLoop(f, nF, `${message}: construyendo el grafo`, start + (end - start) * 0.15, start + (end - start) * 0.35);
+      if (pendingCheckpoint) await pendingCheckpoint;
     }
-    const flow = mf.solve(S, T);
+    const flowTask = rangedTask(task, `${message}: resolviendo el corte mínimo`, start + (end - start) * 0.35, start + (end - start) * 0.9);
+    const flow = await mf.solve(S, T, 1e-12, flowTask);
     if (flow >= BIG / 2) return null;
-    const side = mf.sourceSide(S);
+    const side = await mf.sourceSide(S, 1e-12, flowTask);
     // Lado S en caras: núcleo + caras de la banda alcanzadas
     const sFaces = new Uint8Array(nF);
     for (let f = 0; f < nF; f++) {
       if (local[f] >= 0 ? side[local[f]] : isSource(f)) sFaces[f] = 1;
+      const pendingCheckpoint = checkpointLoop(f, nF, `${message}: clasificando caras`, start + (end - start) * 0.9, end);
+      if (pendingCheckpoint) await pendingCheckpoint;
     }
     return { sFaces, cost: flow };
   };
@@ -298,14 +421,16 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
       ? ` La malla tiene ${ctx.topo.inconsistentEdgeCount} aristas con normales invertidas y el borde no cierra: repará las normales (en el slicer o en Meshmixer) y volvé a cargar el modelo.`
       : ' Ampliá o achicá un poco la selección con los pinceles y volvé a pedir la sugerencia.';
   const eps = 0.04;
-  const suave = runCut(
+  await checkpoint('Buscando el perímetro suave', 0.68);
+  const suave = await runCut(
     (f) => role[f] === 0,
     (f) => role[f] === -1,
     (f) => role[f] === 1,
     (a, b) => eps + (1 - valleyEdge(a, b)) ** 2,
+    'Perímetro suave', 0.68, 0.78,
   );
   if (!suave) return { suggestions: [], reliable: false, message: `No encontramos un límite natural alrededor de la selección.${fallback}`, selectionBoundary: selSug };
-  const loopsSuave = extractLoops(ctx, suave.sFaces);
+  const loopsSuave = await extractLoopsCooperative(ctx, suave.sFaces, task, 0.78, 0.79);
   if (!loopsSuave?.length) {
     return { suggestions: [], reliable: false, message: `No encontramos un límite natural confiable.${fallback}`, selectionBoundary: selSug };
   }
@@ -324,22 +449,27 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   suggestions.push(main);
 
   // Transiciones de curvatura dentro y fuera del valle.
-  const inner = runCut(
+  await checkpoint('Buscando alternativas de perímetro', 0.79);
+  const inner = await runCut(
     (f) => role[f] === 0 && suave.sFaces[f] === 1,
     (f) => role[f] === -1,
     (f) => role[f] === 0 && suave.sFaces[f] === 0,
     (a, b) => 0.3 + kAbs(a, b) + 0.3 * valleyEdge(a, b),
+    'Perímetro ajustado', 0.79, 0.88,
   );
-  const outer = runCut(
+  const outer = await runCut(
     (f) => role[f] === 0 && suave.sFaces[f] === 0,
     (f) => role[f] === -1 || (role[f] === 0 && suave.sFaces[f] === 1),
     (f) => role[f] === 1,
     (a, b) => 0.3 + kAbs(a, b) + 0.3 * valleyEdge(a, b),
+    'Perímetro amplio', 0.88, 0.97,
   );
   const tol = Math.max(2.5 * ctx.avgEdge, 0.06 * rRef);
   for (const [res, kind] of [[inner, 'ajustado'], [outer, 'amplio']] as const) {
     if (!res) continue;
-    const loops = extractLoops(ctx, res.sFaces);
+    const loopStart = kind === 'ajustado' ? 0.97 : 0.98;
+    const loopEnd = kind === 'ajustado' ? 0.98 : 0.99;
+    const loops = await extractLoopsCooperative(ctx, res.sFaces, task, loopStart, loopEnd);
     if (!loops?.length) continue;
     const sug = makeSuggestion(ctx, loops, kind, curv.valley, multi);
     sug.confidence = main.confidence;
@@ -353,16 +483,51 @@ export function suggestPerimeters(ctx: MeshContext, selection: Uint8Array): Sugg
   // Orden: ajustado, suave, amplio
   const order: Record<SuggestionKind, number> = { ajustado: 0, suave: 1, amplio: 2, seleccion: 3 };
   suggestions.sort((a, b) => order[a.kind] - order[b.kind]);
+  await checkpoint('Finalizando sugerencias', 0.99);
   return { suggestions, reliable: true, selectionBoundary: selSug };
 }
 
 /** Componentes conexas (por aristas) de las caras marcadas, de mayor a menor área. */
-function selectedComponents(ctx: MeshContext, sel: Uint8Array): Array<{ faces: number[]; area: number }> {
+type CooperativeStep = { fraction: number };
+
+function consumeStepsSync<T>(steps: Generator<CooperativeStep, T, void>): T {
+  let result = steps.next();
+  while (!result.done) result = steps.next();
+  return result.value;
+}
+
+async function consumeStepsCooperatively<T>(
+  steps: Generator<CooperativeStep, T, void>,
+  task: TaskContext,
+  message: string
+): Promise<T> {
+  let result = steps.next();
+  while (!result.done) {
+    await task.checkpoint(message, result.value.fraction);
+    result = steps.next();
+  }
+  return result.value;
+}
+
+function* selectedComponentsSteps(
+  ctx: MeshContext,
+  sel: Uint8Array
+): Generator<CooperativeStep, Array<{ faces: number[]; area: number }>, void> {
   const nF = ctx.nF;
   const adj = ctx.faceAdj;
   const seen = new Uint8Array(nF);
   const out: Array<{ faces: number[]; area: number }> = [];
+  const totalWork = Math.max(1, 2 * nF);
+  let work = 0;
+  const tick = () => {
+    work += 1;
+    return work % CHECKPOINT_INTERVAL === 0
+      ? { fraction: Math.min(0.99, work / totalWork) }
+      : null;
+  };
   for (let f = 0; f < nF; f++) {
+    const scanProgress = tick();
+    if (scanProgress) yield scanProgress;
     if (!sel[f] || seen[f]) continue;
     const faces: number[] = [];
     let area = 0;
@@ -370,6 +535,8 @@ function selectedComponents(ctx: MeshContext, sel: Uint8Array): Array<{ faces: n
     seen[f] = 1;
     while (stack.length) {
       const x = stack.pop()!;
+      const componentProgress = tick();
+      if (componentProgress) yield componentProgress;
       faces.push(x);
       area += ctx.faceAreas[x];
       for (let k = 0; k < 3; k++) {
@@ -382,7 +549,24 @@ function selectedComponents(ctx: MeshContext, sel: Uint8Array): Array<{ faces: n
     }
     out.push({ faces, area });
   }
-  return out.sort((a, b) => b.area - a.area);
+  const sorted = out.sort((a, b) => b.area - a.area);
+  yield { fraction: 1 };
+  return sorted;
+}
+
+function selectedComponentsCooperative(
+  ctx: MeshContext,
+  sel: Uint8Array,
+  task: TaskContext,
+  start: number,
+  end: number
+): Promise<Array<{ faces: number[]; area: number }>> {
+  const message = 'Buscando componentes seleccionados';
+  return consumeStepsCooperatively(
+    selectedComponentsSteps(ctx, sel),
+    rangedTask(task, message, start, end),
+    message
+  );
 }
 
 /**
@@ -398,14 +582,32 @@ function selectedComponents(ctx: MeshContext, sel: Uint8Array): Array<{ faces: n
  * agujero aunque sea chica: puede estar en cualquier parte del modelo y
  * sumarla metería en la selección caras sin vecinos.
  */
-function fillHoles(ctx: MeshContext, inR: Uint8Array, activeComp: Uint8Array): void {
-  let selArea = 0;
-  for (let f = 0; f < ctx.nF; f++) if (inR[f]) selArea += ctx.faceAreas[f];
+function* fillHolesSteps(
+  ctx: MeshContext,
+  inR: Uint8Array,
+  activeComp: Uint8Array
+): Generator<CooperativeStep, void, void> {
   const nF = ctx.nF;
+  const totalWork = Math.max(1, 4 * nF);
+  let work = 0;
+  const tick = () => {
+    work += 1;
+    return work % CHECKPOINT_INTERVAL === 0
+      ? { fraction: Math.min(0.99, work / totalWork) }
+      : null;
+  };
+  let selArea = 0;
+  for (let f = 0; f < nF; f++) {
+    const progress = tick();
+    if (progress) yield progress;
+    if (inR[f]) selArea += ctx.faceAreas[f];
+  }
   const adj = ctx.faceAdj;
   const seen = new Uint8Array(nF);
   const parts = new Map<number, Array<{ faces: number[]; area: number; enclosed: boolean }>>();
   for (let f = 0; f < nF; f++) {
+    const scanProgress = tick();
+    if (scanProgress) yield scanProgress;
     const comp = ctx.faceComponent[f];
     if (inR[f] || seen[f] || !activeComp[comp]) continue;
     const faces: number[] = [];
@@ -415,6 +617,8 @@ function fillHoles(ctx: MeshContext, inR: Uint8Array, activeComp: Uint8Array): v
     seen[f] = 1;
     while (stack.length) {
       const x = stack.pop()!;
+      const componentProgress = tick();
+      if (componentProgress) yield componentProgress;
       faces.push(x);
       area += ctx.faceAreas[x];
       for (let k = 0; k < 3; k++) {
@@ -433,9 +637,30 @@ function fillHoles(ctx: MeshContext, inR: Uint8Array, activeComp: Uint8Array): v
   for (const l of parts.values()) {
     l.sort((a, b) => b.area - a.area);
     for (let i = 1; i < l.length; i++) {
-      if (l[i].enclosed && l[i].area < 0.25 * selArea) for (const f of l[i].faces) inR[f] = 1;
+      for (const f of l[i].faces) {
+        const progress = tick();
+        if (progress) yield progress;
+        if (l[i].enclosed && l[i].area < 0.25 * selArea) inR[f] = 1;
+      }
     }
   }
+  yield { fraction: 1 };
+}
+
+function fillHolesCooperative(
+  ctx: MeshContext,
+  inR: Uint8Array,
+  activeComp: Uint8Array,
+  task: TaskContext,
+  start: number,
+  end: number
+): Promise<void> {
+  const message = 'Rellenando huecos de la selección';
+  return consumeStepsCooperatively(
+    fillHolesSteps(ctx, inR, activeComp),
+    rangedTask(task, message, start, end),
+    message
+  );
 }
 
 const MAX_PINCH_ROUNDS = 30;
@@ -454,10 +679,17 @@ const MAX_PINCH_ROUNDS = 30;
  * Devuelve null si el borde no cierra (orientación incoherente) o si los
  * pellizcos no se resuelven.
  */
-export function extractLoops(ctx: MeshContext, mark: Uint8Array): number[][] | null {
+function* extractLoopsSteps(ctx: MeshContext, mark: Uint8Array): Generator<CooperativeStep, number[][] | null, void> {
   const { topo } = ctx;
   const work = mark.slice();
   const nonManifold = topo.nonManifoldEdgeCount > 0 ? topo.nonManifoldHalfedges() : null;
+  const workBudget = Math.max(1, MAX_PINCH_ROUNDS * (topo.nH * 8 + ctx.nV * 4 + 1));
+  let workDone = 0;
+  const tick = (): CooperativeStep | null => {
+    workDone++;
+    if (workDone % CHECKPOINT_INTERVAL !== 0) return null;
+    return { fraction: Math.min(0.99, workDone / workBudget) };
+  };
   for (let iter = 0; iter < MAX_PINCH_ROUNDS; iter++) {
     const nextOf = new Map<number, number[]>();
     const add = (a: number, b: number) => {
@@ -467,6 +699,8 @@ export function extractLoops(ctx: MeshContext, mark: Uint8Array): number[][] | n
     };
     const doneEdge = new Set<number>();
     for (let h = 0; h < topo.nH; h++) {
+      const step = tick();
+      if (step) yield step;
       const f = (h / 3) | 0;
       if (!work[f]) continue;
       const t = topo.twin[h];
@@ -485,23 +719,43 @@ export function extractLoops(ctx: MeshContext, mark: Uint8Array): number[][] | n
       const v1 = topo.edgeV1[e];
       let net = 0;
       for (const g of nonManifold.get(e) ?? []) {
+        const innerStep = tick();
+        if (innerStep) yield innerStep;
         if (work[(g / 3) | 0]) net += topo.origin(g) === v0 ? 1 : -1;
       }
       if (net > 0) add(v0, v1);
       else if (net < 0) add(v1, v0);
     }
-    const pinches = [...nextOf].filter(([, outs]) => outs.length > 1).map(([v]) => v);
+    const pinches: number[] = [];
+    for (const [v, outs] of nextOf) {
+      const step = tick();
+      if (step) yield step;
+      if (outs.length > 1) pinches.push(v);
+    }
     if (pinches.length) {
       for (const v of pinches) {
         // Caras alrededor del vértice conectadas a las marcadas por aristas normales:
         // ni islas (caras repetidas, aletas) ni el otro lado de una arista no-manifold.
         const around = new Set<number>();
-        for (let i = topo.vOutStart[v]; i < topo.vOutStart[v + 1]; i++) around.add((topo.vOut[i] / 3) | 0);
-        const stack = [...around].filter((f) => work[f]);
+        for (let i = topo.vOutStart[v]; i < topo.vOutStart[v + 1]; i++) {
+          const step = tick();
+          if (step) yield step;
+          around.add((topo.vOut[i] / 3) | 0);
+        }
+        const stack: number[] = [];
+        for (const f of around) {
+          const step = tick();
+          if (step) yield step;
+          if (work[f]) stack.push(f);
+        }
         const added = new Set(stack);
         while (stack.length) {
+          const step = tick();
+          if (step) yield step;
           const f = stack.pop()!;
           for (let k = 0; k < 3; k++) {
+            const edgeStep = tick();
+            if (edgeStep) yield edgeStep;
             const t = topo.twin[3 * f + k];
             if (t < 0) continue;
             const g = (t / 3) | 0;
@@ -511,43 +765,80 @@ export function extractLoops(ctx: MeshContext, mark: Uint8Array): number[][] | n
             }
           }
         }
-        for (const f of added) work[f] = 1;
+        for (const f of added) {
+          const step = tick();
+          if (step) yield step;
+          work[f] = 1;
+        }
       }
       continue;
     }
     const used = new Set<number>();
     const loops: number[][] = [];
     for (const start of nextOf.keys()) {
+      const step = tick();
+      if (step) yield step;
       if (used.has(start)) continue;
       const cyc: number[] = [];
       let cur = start;
       let guard = 0;
       while (!used.has(cur) && guard++ < 1e7) {
+        const cycleStep = tick();
+        if (cycleStep) yield cycleStep;
         used.add(cur);
         cyc.push(cur);
         const nx = nextOf.get(cur);
-        if (!nx) return null;
+        if (!nx) {
+          yield { fraction: 1 };
+          return null;
+        }
         cur = nx[0];
       }
-      if (cur !== start) return null;
+      if (cur !== start) {
+        yield { fraction: 1 };
+        return null;
+      }
       if (cyc.length >= 3) loops.push(cyc);
     }
     // Orden estable: por posición (x, luego y, luego z) del centro de cada lazo.
     const P = ctx.P;
-    const key = (l: number[]) => {
+    const keyed: Array<{ l: number[]; k: [number, number, number] }> = [];
+    for (const l of loops) {
       let x = 0, y = 0, z = 0;
       for (const v of l) {
+        const step = tick();
+        if (step) yield step;
         x += P[3 * v];
         y += P[3 * v + 1];
         z += P[3 * v + 2];
       }
-      return [x / l.length, y / l.length, z / l.length];
-    };
-    const keyed = loops.map((l) => ({ l, k: key(l) }));
+      keyed.push({ l, k: [x / l.length, y / l.length, z / l.length] });
+    }
     keyed.sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.k[2] - b.k[2]);
+    yield { fraction: 1 };
     return keyed.map((x) => x.l);
   }
+  yield { fraction: 1 };
   return null;
+}
+
+export function extractLoops(ctx: MeshContext, mark: Uint8Array): number[][] | null {
+  return consumeStepsSync(extractLoopsSteps(ctx, mark));
+}
+
+async function extractLoopsCooperative(
+  ctx: MeshContext,
+  mark: Uint8Array,
+  task: TaskContext,
+  start: number,
+  end: number
+): Promise<number[][] | null> {
+  const message = 'Extrayendo lazos del perímetro';
+  return consumeStepsCooperatively(
+    extractLoopsSteps(ctx, mark),
+    rangedTask(task, message, start, end),
+    message
+  );
 }
 
 /** Compatibilidad: el lazo más largo del borde de las caras marcadas de un componente. */
